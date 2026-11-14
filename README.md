@@ -11,6 +11,8 @@ GPU がどのコーデックとレート制御でハードウェアエンコー�
 | `qsv` | Intel | コーデック × レート制御 (CQP / ICQ / VBR / CBR) の対応表 |
 | `nvenc` | NVIDIA | レート制御 (CQP / CQ / VBR / CBR) の対応表と、B フレーム・lookahead・AQ・multipass の対応表 |
 
+`--recommend` を付けると、結果からおすすめのエンコード設定 (ffmpeg のオプション) も出します。
+
 vainfo が申告している内容をそのまま信じるのではなく、ffmpeg で短いテスト映像を実際にエンコードして、通ったものだけを OK にします。
 ドライバの申告と ffmpeg から実際に使える範囲は一致しないことがあるので (たとえば低電力経路では CQP しか使えないなど)、その差もここで分かります。
 
@@ -39,6 +41,13 @@ docker run --rm --device /dev/dri --gpus all hwenc-check all
 対象は `qsv nvenc` のように複数並べても構いません。省略すると、コンテナから見える GPU に合わせて自動で選びます (`/dev/dri` があれば vaapi と qsv、NVIDIA GPU があれば nvenc)。
 必要なデバイスが渡されていないときは、付けるべきオプションを表示して止まります。
 
+結果からおすすめのエンコード設定も出したいときは、`-r` (`--recommend`) を付けます。
+
+```bash
+docker run --rm --device /dev/dri hwenc-check -r qsv
+docker run --rm --gpus all -e RECOMMEND=1 hwenc-check nvenc
+```
+
 GPU が複数あるときは全部を順に調べます。1つに絞るときは環境変数で指定します。
 
 ```bash
@@ -55,6 +64,9 @@ docker run --rm --gpus all -e NVENC_GPU=1 hwenc-check nvenc
 | `LIBVA_DRIVER_NAME` | VA-API ドライバ (`iHD` / `i965` / `radeonsi`) | ベンダーから自動で選ぶ (Intel は iHD → i965 の順) |
 | `NVENC_GPU` | 調べる NVIDIA GPU の番号 | 全部 |
 | `SIZE` | テスト映像の解像度 | `1920x1080` |
+| `RECOMMEND` | `1` で `--recommend` と同じ。`--no-recommend` を付けると引数が優先 | `0` |
+| `REC_HEVC_Q` | おすすめ設定で使う HEVC の品質値 (NVENC の cq はこれに +1) | `22` |
+| `REC_H264_Q` | おすすめ設定で使う H.264 の品質値 (NVENC の cq はこれに +1) | `20` |
 
 ビルド時に `--build-arg BASE_IMAGE=...` でベースイメージを変えられます (既定 `debian:trixie-slim`)。
 
@@ -109,6 +121,58 @@ HEVC         NG         NG         OK         OK         NG         OK
 
 `CQ` は `-rc vbr -cq` による品質目標型です。レート制御の表は、B フレームの対応に左右されないよう `-bf 0` で試しています。
 Pascal 世代 (GTX 10 系、Quadro P 系) は HEVC の B フレームに対応していないので、HEVC の `Bframe` が NG になります。
+
+### おすすめ設定 (`--recommend`)
+
+```
+==== おすすめのエンコード設定
+方針: 1 パスで画質優先。品質目標型 (ICQ / CQ) を優先し、使えなければ CQP などにする
+      品質値は小さいほど高画質・大容量 (HEVC 22 / H.264 20。REC_HEVC_Q / REC_H264_Q で変えられる)
+      ここに出した設定は、この GPU で実際にエンコードが通ったもの
+
+-- VA-API (/dev/dri/renderD128)
+  HEVC       : -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2
+  HEVC(10bit): -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -profile:v main10
+  H.264      : -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 1 -bf 2
+  コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):
+    # HEVC
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -c:a copy output.mkv
+    # HEVC(10bit)
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=p010,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -profile:v main10 -c:a copy output.mkv
+    # H.264
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 1 -bf 2 -c:a copy output.mkv
+    # HEVC(インターレース解除)
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -c:a copy output.mkv
+    # HEVC(10bit, インターレース解除)
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=p010' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -profile:v main10 -c:a copy output.mkv
+    # H.264(インターレース解除)
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 1 -bf 2 -c:a copy output.mkv
+
+-- NVENC (GPU 0)
+  HEVC       : -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 23 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8
+               -multipass qres を足すと少し画質が上がる (速度への影響は GPU とプリセットによる)
+  HEVC(10bit): -c:v hevc_nvenc ... -profile:v main10
+  ...
+  コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):
+    # HEVC
+    ffmpeg -i input.ts -vf format=nv12 -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 23 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8 -c:a copy output.mkv
+    # HEVC(10bit)
+    ffmpeg -i input.ts -vf format=p010le -c:v hevc_nvenc ... -profile:v main10 -c:a copy output.mkv
+    ...
+    # HEVC(インターレース解除)
+    ffmpeg -i input.ts -vf bwdif=mode=send_frame,format=nv12 -c:v hevc_nvenc ... -c:a copy output.mkv
+    ...
+```
+
+選び方は、録画のアーカイブのように「1 パスで、多少大きくなっても画質を優先する」用途を想定しています。
+
+- コマンドは、そのままコピペして使える形で出します (`input.ts` と `output.mkv` だけ書き換える)。HEVC が 10bit でも通る GPU では、10bit 用のコマンドも出します
+- 放送の録画などインターレースの素材向けに、インターレース解除つきのコマンドも出します。VA-API は GPU の `deinterlace_vaapi`、QSV と NVENC は CPU の `bwdif` を使い、どれも 60i を 30p にします。これも実際に通ったものだけを出します
+- コーデックは HEVC と H.264 を出します。AV1 がエンコードできる GPU では、そのことも書きます (品質値の尺度が違うので、値は出しません)
+- レート制御は、品質目標型 (VA-API / QSV は ICQ、NVENC は `-rc vbr -cq`) を優先します。使えないときは VA-API は QVBR → CQP → VBR、QSV は CQP → VBR、NVENC は CQP の順に落とします。CQP にするときは、I / B フレームの QP が P フレームから大きくずれないようオフセットを指定します
+- VA-API は `-low_power` を付けない経路を優先し、通らないときだけ `-low_power 0` / `1` を付けます
+- NVENC は、表で OK だった機能 (B フレーム、B フレーム参照、lookahead、空間 AQ、時間 AQ) を足します。multipass は設定には含めず、使える GPU では `-multipass qres` を足せることを1行添えます。NVENC の multipass は 1 回のエンコードの中でフレームを 2 回解析する方式で、速度への影響は GPU とプリセットによります (重いプリセットではほとんど遅くならない計測もあります)
+- `-compression_level 1` や `-preset slow` などの追加オプションは、通る組み合わせを順に試して選びます。出した設定は、同じ GPU で実際にエンコードが通ったものだけです
 
 ### 記号
 

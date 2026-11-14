@@ -4,9 +4,10 @@
 #   qsv   : Intel GPU の QSV で、コーデック × レート制御の対応表
 #   nvenc : NVIDIA GPU の NVENC で、コーデック × レート制御と、B フレーム・AQ などの機能の対応表
 #
-# 使い方: hwenc-check [vaapi|qsv|nvenc|intel|all ...]
+# 使い方: hwenc-check [-r|--recommend] [vaapi|qsv|nvenc|intel|all ...]
 #   intel は vaapi qsv と同じ。省略すると、見えている GPU に合わせて自動で選ぶ
 #   (/dev/dri があれば vaapi と qsv、NVIDIA GPU があれば nvenc)
+#   -r / --recommend を付けると、結果から選んだおすすめのエンコード設定を最後に出す
 #
 # 環境変数:
 #   TARGET             引数の代わりに調べる対象を指定する (例: TARGET="qsv nvenc")
@@ -14,6 +15,9 @@
 #   LIBVA_DRIVER_NAME  VA-API ドライバ (未指定なら GPU のベンダーから選ぶ。Intel は iHD → i965 の順に試す)
 #   NVENC_GPU          調べる NVIDIA GPU の番号 (未指定なら全部調べる)
 #   SIZE               テスト映像の解像度 (既定 1920x1080)
+#   RECOMMEND          1 にすると --recommend と同じ (既定 0)
+#   REC_HEVC_Q         おすすめ設定で使う HEVC の品質値 (既定 22。NVENC の cq は +1)
+#   REC_H264_Q         おすすめ設定で使う H.264 の品質値 (既定 20。NVENC の cq は +1)
 set -uo pipefail
 
 SIZE="${SIZE:-1920x1080}"
@@ -21,11 +25,20 @@ USER_DRIVER="${LIBVA_DRIVER_NAME:-}"
 VAINFO_OUT="$(mktemp)"
 trap 'rm -f "$VAINFO_OUT"' EXIT
 
-usage() { sed -n '7,9p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '7,10p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ---- 調べる対象を決める ----
 WANT_VAAPI=0 WANT_QSV=0 WANT_NVENC=0
-read -r -a REQ <<<"${*:-${TARGET:-}}"
+RECOMMEND="${RECOMMEND:-0}"
+REQ=()
+for a in "$@"; do
+  case "$a" in
+    -r|--recommend) RECOMMEND=1 ;;
+    --no-recommend) RECOMMEND=0 ;;
+    *) REQ+=("$a") ;;
+  esac
+done
+[ ${#REQ[@]} -eq 0 ] && read -r -a REQ <<<"${TARGET:-}"
 for t in "${REQ[@]}"; do
   case "$t" in
     vaapi) WANT_VAAPI=1 ;;
@@ -75,6 +88,11 @@ fi
 ENCODERS="$(ffmpeg -hide_banner -encoders 2>/dev/null)"
 has_encoder() { grep -qw "$1" <<<"$ENCODERS"; }
 
+# テスト結果。RES["<va|qsv|nv>|<デバイス>|<コーデック>|...|<列>"]=OK/NG
+declare -A RES
+declare -A DRV_OF     # レンダーノードごとに使った VA-API ドライバ
+VA_DONE=() QSV_DONE=() NV_DONE=()
+
 # ---- 表の出力 ----
 COLS=(CQP CBR VBR ICQ QVBR AVBR)
 QSV_COLS=(CQP ICQ VBR CBR)
@@ -95,7 +113,7 @@ va_try() {   # va_try <エンコーダ> <pix_fmt> [オプション...]
   ffmpeg -hide_banner -nostdin -v error \
     -init_hw_device "vaapi=va:$DEV" -filter_hw_device va \
     -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 10 \
-    -vf "format=$fmt,hwupload" -c:v "$enc" "$@" -f null - >/dev/null 2>&1
+    -vf "${VA_VF:-format=$fmt,hwupload}" -c:v "$enc" "$@" -f null - >/dev/null 2>&1
 }
 
 va_rc_opts() {   # レート制御ごとのオプション
@@ -158,6 +176,7 @@ va_check() {
           else
             cells+=(NG)
           fi
+          RES["va|$DEV|$name|$lp|$rc"]="${cells[-1]}"
         fi
       done
       row "$name" "$lp" "${cells[@]}"
@@ -225,6 +244,7 @@ qsv_check() {
     cells=()
     for rc in "${QSV_COLS[@]}"; do
       cells+=("$(qsv_cell "$enc" "$fmt" "$rc" "${extra_arr[@]}")")
+      RES["qsv|$DEV|$name|$rc"]="${cells[-1]}"
     done
     row "$name" "" "${cells[@]}"
   done
@@ -237,7 +257,7 @@ nv_try() {   # nv_try <エンコーダ> <pix_fmt> <GPU 番号> [オプション.
   local enc="$1" fmt="$2" gpu="$3"; shift 3
   ffmpeg -hide_banner -nostdin -v error \
     -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 10 \
-    -vf "format=$fmt" -c:v "$enc" -gpu "$gpu" "$@" -f null - >/dev/null 2>&1
+    -vf "${NV_VF:-format=$fmt}" -c:v "$enc" -gpu "$gpu" "$@" -f null - >/dev/null 2>&1
 }
 
 # B フレームの有無で結果が変わらないよう、レート制御と機能のテストは -bf 0 を基本にする
@@ -297,6 +317,7 @@ nv_table() {   # nv_table <GPU 番号> <rc|feat>
       else
         nv_try "$enc" "$fmt" "$gpu" $(nv_feat_opts "$c") "${extra_arr[@]}" && cells+=(OK) || cells+=(NG)
       fi
+      RES["nv|$gpu|$name|$c"]="${cells[-1]}"
     done
     printf '%-12s' "$name"; printf ' %-10s' "${cells[@]}"; echo
   done
@@ -314,6 +335,7 @@ check_nvenc() {
     nv_table "$gpu" rc
     echo "-- NVENC 機能 (-rc vbr -cq 26 に足して試した結果)"
     nv_table "$gpu" feat
+    NV_DONE+=("$gpu")
   done
 }
 
@@ -346,7 +368,7 @@ check_dri() {
     for d in "${candidates[@]}"; do
       if [ -n "$d" ]; then export LIBVA_DRIVER_NAME="$d"; else unset LIBVA_DRIVER_NAME; fi
       if vainfo --display drm --device "$DEV" >"$VAINFO_OUT" 2>&1 && grep -q VAEntrypoint "$VAINFO_OUT"; then
-        DRV="$d"; found=1; break
+        DRV="$d"; found=1; DRV_OF["$DEV"]="$d"; break
       fi
     done
     if [ "$found" = 0 ]; then
@@ -384,6 +406,7 @@ check_dri() {
       echo
 
       va_check
+      VA_DONE+=("$DEV")
     fi
 
     if [ "$WANT_QSV" = 1 ] && [ "$is_intel" = 0 ]; then
@@ -392,12 +415,262 @@ check_dri() {
     elif [ "$WANT_QSV" = 1 ]; then
       if has_encoder h264_qsv || has_encoder hevc_qsv; then
         qsv_check
+        QSV_DONE+=("$DEV")
       else
         echo "-- QSV: この ffmpeg は QSV に対応していないので飛ばす"
         echo
       fi
     fi
   done
+}
+
+
+# ---- おすすめ設定 ----
+# 方針: 1 パスで画質優先。品質目標型 (ICQ / CQ) を最優先にし、使えなければ CQP などに落とす
+# 出す設定は、最後に同じ GPU で実際にエンコードして通ったものだけにする
+REC_HEVC_Q="${REC_HEVC_Q:-22}"
+REC_H264_Q="${REC_H264_Q:-20}"
+
+set_driver() {   # set_driver <レンダーノード>
+  local d="${DRV_OF[$1]:-}"
+  if [ -n "$d" ]; then export LIBVA_DRIVER_NAME="$d"; else unset LIBVA_DRIVER_NAME; fi
+}
+
+# 追加オプションの候補を前から順に試し、最初に通ったものを返す
+# first_ok <試す関数> <関数の固定引数の数> <固定引数...> -- <候補1> <候補2> ...
+first_ok() {
+  local fn="$1" n="$2"; shift 2
+  local fixed=("${@:1:$n}"); shift "$n"
+  [ "$1" = -- ] && shift
+  local c
+  for c in "$@"; do
+    # shellcheck disable=SC2086
+    if "$fn" "${fixed[@]}" $c; then squash "$c"; return 0; fi
+  done
+  return 1
+}
+
+squash() { tr -s ' ' <<<"$*" | sed 's/^ //; s/ $//'; }   # 余分な空白を詰める
+
+# コピペ用のコマンドをためておき、各セクションの最後にまとめて出す
+# インターレース解除つきのコマンドは、通常のコマンドの後ろにまとめて出す
+EX_LBL=() EX_CMD=() DEI_LBL=() DEI_CMD=()
+ex_add() { EX_LBL+=("$1"); EX_CMD+=("$(squash "$2")"); }
+dei_add() { DEI_LBL+=("$1"); DEI_CMD+=("$(squash "$2")"); }
+ex_print() {
+  local i
+  EX_LBL+=("${DEI_LBL[@]}") EX_CMD+=("${DEI_CMD[@]}")
+  if [ ${#EX_CMD[@]} -gt 0 ]; then
+    echo "  コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):"
+    for i in "${!EX_CMD[@]}"; do
+      echo "    # ${EX_LBL[$i]}"
+      echo "    ${EX_CMD[$i]}"
+    done
+  fi
+  EX_LBL=() EX_CMD=() DEI_LBL=() DEI_CMD=()
+}
+
+# インターレース解除のフィルタ。VA-API は GPU の deinterlace_vaapi、QSV と NVENC は CPU の bwdif を使う
+# どれも 1 フレームに 1 枚出す (60i → 30p)
+VA_DEI_8='format=nv12,hwupload,deinterlace_vaapi=rate=frame'
+VA_DEI_10='format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=p010'
+SW_DEI_8='bwdif=mode=send_frame,format=nv12'
+SW_DEI_10='bwdif=mode=send_frame,format=p010le'
+
+rec_line() {   # rec_line <見出し> <オプション文字列>
+  printf '  %-11s: %s\n' "$1" "$(squash "$2")"
+}
+
+rec_vaapi() {
+  local dev="$1" name enc q qp lp rc lp_opt rc_opt base extra line
+  set_driver "$dev"
+  DEV="$dev"
+  echo "-- VA-API ($dev)"
+  for name in HEVC H.264; do
+    case "$name" in
+      HEVC)  enc=hevc_vaapi q="$REC_HEVC_Q" ;;
+      H.264) enc=h264_vaapi q="$REC_H264_Q" ;;
+    esac
+    qp=$((q - 1))
+    # レート制御と low_power の組み合わせを、優先順に探す
+    line=""
+    for rc in ICQ QVBR CQP VBR; do
+      for lp in auto 0 1; do
+        [ "${RES["va|$dev|$name|$lp|$rc"]:-}" = OK ] || continue
+        case "$lp" in auto) lp_opt="" ;; *) lp_opt="-low_power $lp" ;; esac
+        case "$rc" in
+          ICQ)  rc_opt="-rc_mode ICQ -global_quality $q" ;;
+          QVBR) rc_opt="-rc_mode QVBR -global_quality $q -b:v 8M -maxrate 20M" ;;
+          CQP)  rc_opt="-rc_mode CQP -qp $qp -i_qfactor 1 -i_qoffset -2 -b_qfactor 1 -b_qoffset 2" ;;
+          VBR)  rc_opt="-rc_mode VBR -b:v 8M -maxrate 15M" ;;
+        esac
+        base="$lp_opt $rc_opt"
+        # shellcheck disable=SC2086
+        if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 1 -bf 2" "$base -bf 2" "$base -compression_level 1" "$base"); then
+          line="-c:v $enc $extra"
+          rec_line "$name" "$line"
+          [ "$rc" != ICQ ] && echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+          ex_add "$name" "ffmpeg -vaapi_device $dev -i input.ts -vf 'format=nv12,hwupload' $line -c:a copy output.mkv"
+          # shellcheck disable=SC2086
+          if VA_VF="$VA_DEI_8" va_try "$enc" nv12 $extra; then
+            dei_add "$name(インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_8' $line -c:a copy output.mkv"
+          fi
+          # 10bit も同じ設定で通るか
+          if [ "$name" = HEVC ] && [ "${RES["va|$dev|HEVC-10bit|$lp|$rc"]:-}" = OK ]; then
+            # shellcheck disable=SC2086
+            if va_try "$enc" p010 $extra -profile:v main10; then
+              rec_line "HEVC(10bit)" "$line -profile:v main10"
+              ex_add "HEVC(10bit)" "ffmpeg -vaapi_device $dev -i input.ts -vf 'format=p010,hwupload' $line -profile:v main10 -c:a copy output.mkv"
+              # shellcheck disable=SC2086
+              if VA_VF="$VA_DEI_10" va_try "$enc" p010 $extra -profile:v main10; then
+                dei_add "HEVC(10bit, インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_10' $line -profile:v main10 -c:a copy output.mkv"
+              fi
+            fi
+          fi
+          break 2
+        fi
+      done
+    done
+    [ -z "$line" ] && rec_line "$name" "(使える設定が無い)"
+  done
+  if [ "${RES["va|$dev|AV1|auto|ICQ"]:-}" = OK ] || [ "${RES["va|$dev|AV1|auto|CQP"]:-}" = OK ]; then
+    echo "  AV1 もエンコードできる (av1_vaapi。品質値の尺度が HEVC と違うので、値は試して決める)"
+  fi
+  ex_print
+  echo
+}
+
+qsv_run() {   # qsv_run <エンコーダ> <pix_fmt> <ICQ を確かめるか 0/1> [オプション...]
+  local enc="$1" fmt="$2" want_icq="$3" log; shift 3
+  log=$(ffmpeg -hide_banner -nostdin -v verbose \
+          -init_hw_device "qsv=qs:hw,child_device=$DEV" -filter_hw_device qs \
+          -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 10 \
+          -vf "${QSV_VF:-format=$fmt}" -c:v "$enc" "$@" -f null - 2>&1) || return 1
+  [ "$want_icq" = 0 ] && return 0
+  grep -i ratecontrol <<<"$log" | grep -qE '\b(LA_)?ICQ\b'
+}
+
+rec_qsv() {
+  local dev="$1" name enc q rc rc_opt want extra line
+  set_driver "$dev"
+  DEV="$dev"
+  echo "-- QSV ($dev)"
+  for name in HEVC H.264; do
+    case "$name" in
+      HEVC)  enc=hevc_qsv q="$REC_HEVC_Q" ;;
+      H.264) enc=h264_qsv q="$REC_H264_Q" ;;
+    esac
+    line=""
+    for rc in ICQ CQP VBR; do
+      [ "${RES["qsv|$dev|$name|$rc"]:-}" = OK ] || continue
+      want=0
+      case "$rc" in
+        ICQ) rc_opt="-global_quality $q"; want=1 ;;
+        CQP) rc_opt="-q:v $((q - 1))" ;;
+        VBR) rc_opt="-b:v 8M -maxrate 15M" ;;
+      esac
+      if extra=$(first_ok qsv_run 3 "$enc" nv12 "$want" -- \
+                   "$rc_opt -preset slow -extbrc 1 -look_ahead_depth 40" "$rc_opt -preset slow" "$rc_opt"); then
+        line="-c:v $enc $extra"
+        rec_line "$name" "$line"
+        [ "$rc" != ICQ ] && echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+        ex_add "$name" "ffmpeg -init_hw_device qsv=qs:hw,child_device=$dev -i input.ts -vf format=nv12 $line -c:a copy output.mkv"
+        # shellcheck disable=SC2086
+        if QSV_VF="$SW_DEI_8" qsv_run "$enc" nv12 0 $extra; then
+          dei_add "$name(インターレース解除)" "ffmpeg -init_hw_device qsv=qs:hw,child_device=$dev -i input.ts -vf $SW_DEI_8 $line -c:a copy output.mkv"
+        fi
+        if [ "$name" = HEVC ] && [ "${RES["qsv|$dev|HEVC-10bit|$rc"]:-}" = OK ]; then
+          # shellcheck disable=SC2086
+          if qsv_run "$enc" p010le "$want" $extra -profile:v main10; then
+            rec_line "HEVC(10bit)" "$line -profile:v main10"
+            ex_add "HEVC(10bit)" "ffmpeg -init_hw_device qsv=qs:hw,child_device=$dev -i input.ts -vf format=p010le $line -profile:v main10 -c:a copy output.mkv"
+            # shellcheck disable=SC2086
+            if QSV_VF="$SW_DEI_10" qsv_run "$enc" p010le 0 $extra -profile:v main10; then
+              dei_add "HEVC(10bit, インターレース解除)" "ffmpeg -init_hw_device qsv=qs:hw,child_device=$dev -i input.ts -vf $SW_DEI_10 $line -profile:v main10 -c:a copy output.mkv"
+            fi
+          fi
+        fi
+        break
+      fi
+    done
+    [ -z "$line" ] && rec_line "$name" "(使える設定が無い)"
+  done
+  ex_print
+  echo
+}
+
+rec_nvenc() {
+  local gpu="$1" name enc q rc_opt feat extra line gpu_opt=""
+  [ ${#NV_GPUS[@]} -gt 1 ] && gpu_opt="-gpu $gpu"
+  echo "-- NVENC (GPU $gpu)"
+  for name in HEVC H.264; do
+    case "$name" in
+      HEVC)  enc=hevc_nvenc q=$((REC_HEVC_Q + 1)) ;;
+      H.264) enc=h264_nvenc q=$((REC_H264_Q + 1)) ;;
+    esac
+    ok() { [ "${RES["nv|$gpu|$name|$1"]:-}" = OK ]; }
+    if ok CQ; then
+      rc_opt="-rc vbr -cq $q -b:v 0 -maxrate 20M -bufsize 40M"
+    elif ok CQP; then
+      rc_opt="-rc constqp -qp $((q - 2))"
+    else
+      rec_line "$name" "(使える設定が無い)"
+      continue
+    fi
+    feat=""
+    if ok Bframe; then
+      feat="-bf 3"
+      ok BrefMid && feat="$feat -b_ref_mode middle"
+    else
+      feat="-bf 0"
+    fi
+    ok Lookahead && feat="$feat -rc-lookahead 20"
+    ok SpatialAQ && feat="$feat -spatial_aq 1 -aq-strength 8"
+    ok TemporalAQ && ok Lookahead && feat="$feat -temporal_aq 1"
+    if extra=$(first_ok nv_try 3 "$enc" nv12 "$gpu" -- \
+                 "-preset p6 -tune hq $rc_opt $feat" "-preset p6 $rc_opt $feat" "-preset p6 $rc_opt -bf 0"); then
+      line="-c:v $enc $extra"
+      rec_line "$name" "$line"
+      ok CQ || echo "               (CQP を使用。CQ はこの GPU では使えない)"
+      ok Multipass && echo "               -multipass qres を足すと少し画質が上がる (速度への影響は GPU とプリセットによる)"
+      ex_add "$name" "ffmpeg -i input.ts -vf format=nv12 $line $gpu_opt -c:a copy output.mkv"
+      # shellcheck disable=SC2086
+      if NV_VF="$SW_DEI_8" nv_try "$enc" nv12 "$gpu" $extra; then
+        dei_add "$name(インターレース解除)" "ffmpeg -i input.ts -vf $SW_DEI_8 $line $gpu_opt -c:a copy output.mkv"
+      fi
+      if [ "$name" = HEVC ] && [ "${RES["nv|$gpu|HEVC-10bit|CQ"]:-}" = OK ]; then
+        # shellcheck disable=SC2086
+        if nv_try "$enc" p010le "$gpu" $extra -profile:v main10; then
+          rec_line "HEVC(10bit)" "$line -profile:v main10"
+          ex_add "HEVC(10bit)" "ffmpeg -i input.ts -vf format=p010le $line -profile:v main10 $gpu_opt -c:a copy output.mkv"
+          # shellcheck disable=SC2086
+          if NV_VF="$SW_DEI_10" nv_try "$enc" p010le "$gpu" $extra -profile:v main10; then
+            dei_add "HEVC(10bit, インターレース解除)" "ffmpeg -i input.ts -vf $SW_DEI_10 $line -profile:v main10 $gpu_opt -c:a copy output.mkv"
+          fi
+        fi
+      fi
+    else
+      rec_line "$name" "(使える設定が無い)"
+    fi
+  done
+  if [ "${RES["nv|$gpu|AV1|CQ"]:-}" = OK ]; then
+    echo "  AV1 もエンコードできる (av1_nvenc。cq の尺度が HEVC と違うので、値は試して決める)"
+  fi
+  ex_print
+  echo
+}
+
+recommend() {
+  local d g
+  echo
+  echo "==== おすすめのエンコード設定"
+  echo "方針: 1 パスで画質優先。品質目標型 (ICQ / CQ) を優先し、使えなければ CQP などにする"
+  echo "      品質値は小さいほど高画質・大容量 (HEVC $REC_HEVC_Q / H.264 $REC_H264_Q。REC_HEVC_Q / REC_H264_Q で変えられる)"
+  echo "      ここに出した設定は、この GPU で実際にエンコードが通ったもの"
+  echo
+  for d in "${VA_DONE[@]}"; do rec_vaapi "$d"; done
+  for d in "${QSV_DONE[@]}"; do rec_qsv "$d"; done
+  for g in "${NV_DONE[@]}"; do rec_nvenc "$g"; done
 }
 
 # ---- 本体 ----
@@ -430,3 +703,6 @@ if [ "$WANT_NVENC" = 1 ]; then
              Multipass = -multipass qres (1/4 解像度の下見)
 EOF
 fi
+
+[ "$RECOMMEND" = 1 ] && recommend
+exit 0
