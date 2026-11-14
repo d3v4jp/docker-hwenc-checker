@@ -91,6 +91,7 @@ has_encoder() { grep -qw "$1" <<<"$ENCODERS"; }
 # テスト結果。RES["<va|qsv|nv>|<デバイス>|<コーデック>|...|<列>"]=OK/NG
 declare -A RES
 declare -A DRV_OF     # レンダーノードごとに使った VA-API ドライバ
+declare -A KDRV_OF    # レンダーノードごとのカーネルドライバ (i915 / xe など)
 VA_DONE=() QSV_DONE=() NV_DONE=()
 
 # ---- 表の出力 ----
@@ -156,6 +157,9 @@ va_check() {
       row "$name" "-" "(エンコード非対応)"
       continue
     fi
+    # おすすめ設定で経路を判断するため、使えるエントリポイントを覚えておく
+    has_ent VAEntrypointEncSlice "${prof_arr[@]}" && RES["va|$DEV|$name|has0"]=1
+    has_ent VAEntrypointEncSliceLP "${prof_arr[@]}" && RES["va|$DEV|$name|has1"]=1
     for lp in auto 0 1; do
       case "$lp" in
         auto) lp_opts=() ;;
@@ -411,6 +415,7 @@ check_dri() {
 
     echo "==== $DEV"
     echo "GPU : ${gpu:-不明} [${vendor:-?}:${devid:-?}] カーネルドライバ ${kdrv:-?} (${slot:-?})"
+    KDRV_OF["$DEV"]="$kdrv"
     if [ "$vendor" = 0x8086 ] && [ -n "$devid" ]; then
       echo "世代 : $(intel_gen "$devid") ※デバイス ID からの推定"
       echo "HuC : $(huc_conf "$kdrv")"
@@ -539,16 +544,75 @@ VA_DEI_10='format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=
 SW_DEI_8='bwdif=mode=send_frame,format=nv12'
 SW_DEI_10='bwdif=mode=send_frame,format=p010le'
 
+# 表で OK (QSV は OK* も含む) が1つでもあれば、そのコーデックは使える
+avail() {   # avail <キーの先頭 (例: va|/dev/dri/renderD128|HEVC|)>
+  local k
+  for k in "${!RES[@]}"; do
+    [[ "$k" == "$1"* && "${RES[$k]}" == OK* ]] && return 0
+  done
+  return 1
+}
+
+# おすすめ設定の最初に、使えないものを簡潔に書く。何も使えなければ 1 を返す
+rec_notice() {   # rec_notice <キーの先頭 (例: va|/dev/dri/renderD128)>
+  local p="$1" hevc=0 h264=0
+  avail "$p|HEVC|" && hevc=1
+  avail "$p|H.264|" && h264=1
+  if [ "$hevc" = 0 ] && [ "$h264" = 0 ]; then
+    echo "  HEVC も H.264 も使えないので出力しません。"
+    return 1
+  fi
+  [ "$hevc" = 0 ] && echo "  HEVC は使えないので出力しません。"
+  if [ "$hevc" = 1 ] && ! avail "$p|HEVC-10bit|"; then
+    echo "  10bit エンコードは使えないので出力しません。"
+  fi
+  [ "$h264" = 0 ] && echo "  H.264 は使えないので出力しません。"
+  return 0
+}
+
 rec_line() {   # rec_line <見出し> <オプション文字列>
   printf '  %-11s: %s\n' "$1" "$(squash "$2")"
 }
 
+# 経路の名前 (low_power auto はエントリポイントの有無から判断する)
+va_path() {   # va_path <レンダーノード> <コーデック> <low_power>
+  case "$3" in
+    0) echo "通常 (VME)" ;;
+    1) echo "低電力 (VDEnc)" ;;
+    *) if [ -n "${RES["va|$1|$2|has0"]:-}" ]; then echo "通常 (VME)"; else echo "低電力 (VDEnc)"; fi ;;
+  esac
+}
+
+# 低電力の経路しかなく、そこで CQP だけが通るなら、HuC が読み込まれていないと判断する
+va_huc_missing() {   # va_huc_missing <レンダーノード> <コーデック>
+  local dev="$1" name="$2" lp rc
+  [ -n "${RES["va|$dev|$name|has1"]:-}" ] && [ -z "${RES["va|$dev|$name|has0"]:-}" ] || return 1
+  [ "${RES["va|$dev|$name|1|CQP"]:-}" = OK ] || return 1
+  for lp in auto 1; do
+    for rc in CBR VBR ICQ QVBR AVBR; do
+      [ "${RES["va|$dev|$name|$lp|$rc"]:-}" = OK ] && return 1
+    done
+  done
+  return 0
+}
+
+# 上限付き (QVBR) の目標と上限 [Mbps]
+#   名前 | コーデック | 目標 | 上限
+VA_CAP_ROWS=(
+  "HEVC GR|HEVC|6|9"
+  "HEVC BS/CS|HEVC|8|12"
+  "H.264 GR|H.264|8|10"
+  "H.264 BS/CS|H.264|11|14"
+)
+
 rec_vaapi() {
-  local dev="$1" name enc q qp lp rc lp_opt rc_opt base extra line
+  local dev="$1" name enc q qp lp rc lp_opt rc_opt base extra line huc_hint=0
   set_driver "$dev"
   DEV="$dev"
   echo "-- VA-API ($dev)"
+  if ! rec_notice "va|$dev"; then echo; return; fi
   for name in HEVC H.264; do
+    avail "va|$dev|$name|" || continue
     case "$name" in
       HEVC)  enc=hevc_vaapi q="$REC_HEVC_Q" ;;
       H.264) enc=h264_vaapi q="$REC_H264_Q" ;;
@@ -571,7 +635,13 @@ rec_vaapi() {
         if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 1 -bf 2" "$base -bf 2" "$base -compression_level 1" "$base"); then
           line="-c:v $enc $extra"
           rec_line "$name" "$line"
-          [ "$rc" != ICQ ] && echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+          echo "               経路: $(va_path "$dev" "$name" "$lp")"
+          if va_huc_missing "$dev" "$name"; then
+            echo "               (低電力の経路しかなく、HuC が読み込まれていないため CQP しか使えない)"
+            huc_hint=1
+          elif [ "$rc" != ICQ ]; then
+            echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+          fi
           ex_add "$name" "ffmpeg -vaapi_device $dev -i input.ts -vf 'format=nv12,hwupload' $line -c:a copy output.mkv"
           # shellcheck disable=SC2086
           if VA_VF="$VA_DEI_8" va_try "$enc" nv12 $extra; then
@@ -598,8 +668,58 @@ rec_vaapi() {
   if [ "${RES["va|$dev|AV1|auto|ICQ"]:-}" = OK ] || [ "${RES["va|$dev|AV1|auto|CQP"]:-}" = OK ]; then
     echo "  AV1 もエンコードできる (av1_vaapi。品質値の尺度が HEVC と違うので、値は試して決める)"
   fi
+  rec_vaapi_cap "$dev"
   ex_print
+  if [ "$huc_hint" = 1 ]; then
+    echo "  HuC を有効にしてから測定し直すと、ICQ と上限付き (QVBR) の設定も確かめられる:"
+    if [ "${KDRV_OF[$dev]:-}" = xe ]; then
+      echo "    xe ドライバは HuC を自動で読み込むので、HuC のファームウェア (linux-firmware) が入っているかを確かめる"
+    else
+      echo "    1. カーネルのパラメータに i915.enable_guc=2 を足す"
+      echo "       (例: /etc/default/grub の GRUB_CMDLINE_LINUX_DEFAULT に追記して、sudo update-grub)"
+      echo "    2. 再起動して、もう一度 hwenc-check を実行する"
+    fi
+  fi
   echo
+}
+
+# 上限付き (QVBR) の設定。表で QVBR が通った経路で、実際にエンコードが通ったものだけを出す
+rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
+  local dev="$1" r label name tgt max enc q lp lp_opt base extra line="" shown=0
+  for r in "${VA_CAP_ROWS[@]}"; do
+    IFS='|' read -r label name tgt max <<<"$r"
+    case "$name" in
+      HEVC)  enc=hevc_vaapi q="$REC_HEVC_Q" ;;
+      H.264) enc=h264_vaapi q="$REC_H264_Q" ;;
+    esac
+    for lp in auto 0 1; do
+      [ "${RES["va|$dev|$name|$lp|QVBR"]:-}" = OK ] || continue
+      case "$lp" in auto) lp_opt="" ;; *) lp_opt="-low_power $lp" ;; esac
+      base="$lp_opt -rc_mode QVBR -global_quality $q -b:v ${tgt}M -maxrate ${max}M -bufsize $((max * 2))M"
+      if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 1 -bf 2" "$base -bf 2" "$base -compression_level 1" "$base"); then
+        if [ "$shown" = 0 ]; then
+          echo "  上限付き (QVBR。ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
+          shown=1
+        fi
+        line="-c:v $enc $extra"
+        rec_line "$label" "$line"
+        dei_add "$label 上限付き(インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_8' $line -c:a copy output.mkv"
+        line="ok"
+        break
+      fi
+      line=""
+    done
+    if [ "${line:-}" != ok ] && va_huc_missing "$dev" "$name"; then
+      if [ "$shown" = 0 ]; then
+        echo "  上限付き (QVBR。ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
+        shown=1
+      fi
+      rec_line "$label" "(HuC が読み込まれていないため確かめられない。下の手順で HuC を有効にして測定し直す)"
+    fi
+  done
+  if [ "$shown" = 0 ]; then
+    echo "  上限付き (QVBR): この GPU では QVBR が通らなかった"
+  fi
 }
 
 qsv_run() {   # qsv_run <エンコーダ> <pix_fmt> <ICQ を確かめるか 0/1> [オプション...]
@@ -617,7 +737,9 @@ rec_qsv() {
   set_driver "$dev"
   DEV="$dev"
   echo "-- QSV ($dev)"
+  if ! rec_notice "qsv|$dev"; then echo; return; fi
   for name in HEVC H.264; do
+    avail "qsv|$dev|$name|" || continue
     case "$name" in
       HEVC)  enc=hevc_qsv q="$REC_HEVC_Q" ;;
       H.264) enc=h264_qsv q="$REC_H264_Q" ;;
@@ -665,7 +787,9 @@ rec_nvenc() {
   local gpu="$1" name enc q rc_opt feat extra line gpu_opt=""
   [ ${#NV_GPUS[@]} -gt 1 ] && gpu_opt="-gpu $gpu"
   echo "-- NVENC (GPU $gpu)"
+  if ! rec_notice "nv|$gpu"; then echo; return; fi
   for name in HEVC H.264; do
+    avail "nv|$gpu|$name|" || continue
     case "$name" in
       HEVC)  enc=hevc_nvenc q=$((REC_HEVC_Q + 1)) ;;
       H.264) enc=h264_nvenc q=$((REC_H264_Q + 1)) ;;
