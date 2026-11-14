@@ -63,7 +63,7 @@ HAVE_DRI=0
 NV_GPUS=()
 if command -v nvidia-smi >/dev/null 2>&1; then
   mapfile -t NV_GPUS < <(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null)
-elif ldconfig -p 2>/dev/null | grep -q libnvidia-encode; then
+elif ldconfig -p 2>/dev/null | grep libnvidia-encode >/dev/null; then
   NV_GPUS=(0)
 fi
 [ -n "${NVENC_GPU:-}" ] && NV_GPUS=("$NVENC_GPU")
@@ -213,7 +213,7 @@ qsv_cell() {   # qsv_cell <エンコーダ> <pix_fmt> <レート制御> [追加�
              -init_hw_device "qsv=qs:hw,child_device=$DEV" -filter_hw_device qs \
              -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 10 \
              -vf "format=$fmt" -c:v "$enc" $(qsv_rc_opts "$rc") "$@" -f null - 2>&1); then
-    if grep -i ratecontrol <<<"$log" | grep -qw "$rc"; then echo OK; else echo 'OK*'; fi
+    if grep -i ratecontrol <<<"$log" | grep -w "$rc" >/dev/null; then echo OK; else echo 'OK*'; fi
   else
     echo NG
   fi
@@ -547,7 +547,7 @@ qsv_run() {   # qsv_run <エンコーダ> <pix_fmt> <ICQ を確かめるか 0/1>
           -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 10 \
           -vf "${QSV_VF:-format=$fmt}" -c:v "$enc" "$@" -f null - 2>&1) || return 1
   [ "$want_icq" = 0 ] && return 0
-  grep -i ratecontrol <<<"$log" | grep -qE '\b(LA_)?ICQ\b'
+  grep -i ratecontrol <<<"$log" | grep -E '\b(LA_)?ICQ\b' >/dev/null
 }
 
 rec_qsv() {
