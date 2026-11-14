@@ -70,6 +70,18 @@ docker run --rm --gpus all -e NVENC_GPU=1 hwenc-check nvenc
 
 ビルド時に `--build-arg BASE_IMAGE=...` でベースイメージを変えられます (既定 `debian:trixie-slim`)。
 
+### 古い Intel GPU の QSV (libmfx1)
+
+Ice Lake 以前の Intel GPU (Broadwell〜Ice Lake。Kaby Lake や Coffee Lake を含む) で QSV を使うには、Intel Media SDK のランタイム (`libmfx1`) が必要です。
+`libmfx1` は Debian trixie で削除されたので、このイメージではベースイメージのリポジトリに無いとき、`libmfx1` だけを bookworm のリポジトリから入れます (依存するライブラリはベースイメージのものを使い、入れ終わったら bookworm のリポジトリは外します)。
+ffmpeg の QSV (oneVPL のディスパッチャ) は、新しいランタイム (`libmfx-gen1.2`) が使えない GPU では、このランタイムを読み込みます。
+
+既定で入れるようになっています。Tiger Lake 以降の GPU しか使わず、入れたくないときは無効にしてビルドします。
+
+```bash
+docker build --build-arg LIBMFX1=0 -t hwenc-check .
+```
+
 ## 出力の見方
 
 以下は表示の例です。
@@ -221,9 +233,9 @@ NVENC の機能のテストは、どれも `-rc vbr -cq 26 -b:v 0` に足して�
 | `ffmpeg`、`vainfo`、`pciutils` | テストと情報表示 |
 | `intel-media-va-driver-non-free` | Intel Broadwell 以降の VA-API ドライバ (iHD) |
 | `mesa-va-drivers` | AMD の VA-API ドライバ (radeonsi) |
-| `libmfx-gen1.2` | Intel Tiger Lake 以降の QSV ランタイム (oneVPL) |
+| `libmfx-gen1.2` | Intel Tiger Lake 以降の QSV ランタイム (oneVPL。リポジトリにあるときだけ入れる) |
 | `i965-va-driver-shaders` | Intel Haswell 以前の VA-API ドライバ (リポジトリにあるときだけ入れる) |
-| `libmfx1` | Intel Ice Lake 以前の QSV ランタイム (リポジトリにあるときだけ入れる) |
+| `libmfx1` | Intel Ice Lake 以前の QSV ランタイム (Media SDK。`LIBMFX1=1` のとき入れる。ベースイメージに無ければ bookworm から入れる) |
 
 NVIDIA のパッケージはイメージに入っていません。ffmpeg は NVENC のライブラリを実行時に読み込み、そのライブラリと `nvidia-smi` は `--gpus` を付けたときに NVIDIA Container Toolkit がホストから渡します (イメージで `NVIDIA_DRIVER_CAPABILITIES=video,utility` を指定しています)。
 
@@ -232,7 +244,7 @@ NVIDIA のパッケージはイメージに入っていません。ffmpeg は NV
 - **「レンダーノードが見つからない」と出る**: `docker run` に `--device /dev/dri` を付けてください。
 - **「NVIDIA GPU が見えない」と出る**: ホストに NVIDIA Container Toolkit が入っているか、`docker run` に `--gpus all` を付けたかを確認してください。
 - **QSV が「この ffmpeg は QSV に対応していない」と出る**: ベースイメージの ffmpeg が QSV なしでビルドされています。`BASE_IMAGE` で別のディストリビューションを試してください。
-- **古い Intel GPU で QSV が全部 NG になる**: Ice Lake 以前の GPU は Media SDK (`libmfx1`) が必要です。ベースイメージのリポジトリに `libmfx1` が無いと入らないので、ビルドログで確認してください。
+- **古い Intel GPU で QSV が全部 NG になる**: Ice Lake 以前の GPU は Media SDK (`libmfx1`) が必要です。QSV の表の上に出る「ランタイム」の行に Media SDK が無ければ、`LIBMFX1=0` でビルドしたイメージを使っています。既定 (`LIBMFX1=1`) でビルドし直してください。
 - **VA-API ドライバを開けなかったと出る**: `LIBVA_DRIVER_NAME` でドライバを指定して試してください (Haswell 以前の Intel は `i965`)。
 
 ## ファイル

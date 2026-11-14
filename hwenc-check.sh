@@ -232,7 +232,17 @@ QSV_ROWS=(
 qsv_check() {
   local name enc fmt extra rc cells
   echo "-- QSV エンコード (ffmpeg で実際に試した結果)"
+  local rt=() libs
+  libs="$(ldconfig -p 2>/dev/null)"   # grep -q でパイプを途中で閉じると pipefail で失敗扱いになるので、先に読み込む
+  grep -q 'libmfx-gen\.so' <<<"$libs" && rt+=("oneVPL (libmfx-gen、Tiger Lake 以降)")
+  grep -q 'libmfxhw64\.so' <<<"$libs" && rt+=("Media SDK (libmfxhw64、Ice Lake 以前)")
+  if [ ${#rt[@]} -eq 2 ]; then
+    echo "ランタイム: ${rt[0]} / ${rt[1]}"
+  else
+    echo "ランタイム: ${rt[0]:-見つからない}"
+  fi
   row codec "" "${QSV_COLS[@]}"
+  local any_ok=0
   for r in "${QSV_ROWS[@]}"; do
     IFS='|' read -r name enc fmt extra <<<"$r"
     # shellcheck disable=SC2206
@@ -245,9 +255,17 @@ qsv_check() {
     for rc in "${QSV_COLS[@]}"; do
       cells+=("$(qsv_cell "$enc" "$fmt" "$rc" "${extra_arr[@]}")")
       RES["qsv|$DEV|$name|$rc"]="${cells[-1]}"
+      [ "${cells[-1]}" != NG ] && any_ok=1
     done
     row "$name" "" "${cells[@]}"
   done
+  if [ "$any_ok" = 0 ]; then
+    if grep -q 'libmfxhw64\.so' <<<"$libs"; then
+      echo "QSV が全部 NG: ランタイムはあるが、この GPU では開けなかった (VA-API のドライバも確認する)"
+    else
+      echo "QSV が全部 NG: Ice Lake 以前の GPU は Media SDK (libmfx1) が必要。LIBMFX1=1 でビルドしたイメージを使う"
+    fi
+  fi
   echo
 }
 
