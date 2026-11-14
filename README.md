@@ -104,6 +104,7 @@ AV1          -         (エンコード非対応)
 自分のスクリプトで `-low_power` を指定していないなら、`auto` の行を見れば足ります。
 
 この表の前に、vainfo が申告しているプロファイルごとのデコード / エンコード / 低電力エンコードの一覧も出ます。
+Intel GPU では、GPU の行の下に、PCI のデバイス ID から推定した GPU の世代と QSV のバージョン (例: `Gen9.5 / QSV 6 (Kaby Lake・Coffee Lake・Comet Lake)`) も出します。
 
 ### QSV
 

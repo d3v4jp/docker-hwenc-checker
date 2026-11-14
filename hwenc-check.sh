@@ -358,6 +358,23 @@ check_nvenc() {
 }
 
 # ---- Intel / AMD (/dev/dri) ----
+# Intel GPU の世代と QSV のバージョンを、PCI のデバイス ID から推定する
+intel_gen() {   # intel_gen <デバイス ID (0x....)>
+  case "${1,,}" in
+    0x010?|0x011?|0x012?)       echo "Gen6 / QSV 1 (Sandy Bridge)" ;;
+    0x015?|0x016?)              echo "Gen7 / QSV 2 (Ivy Bridge)" ;;
+    0x04??|0x0a??|0x0c??|0x0d??) echo "Gen7.5 / QSV 3 (Haswell)" ;;
+    0x16??|0x22b?)              echo "Gen8 / QSV 4 (Broadwell)" ;;
+    0x19??|0x5a8?)              echo "Gen9 / QSV 5 (Skylake)" ;;
+    0x59??|0x3e??|0x9b??|0x87c?|0x318?) echo "Gen9.5 / QSV 6 (Kaby Lake・Coffee Lake・Comet Lake)" ;;
+    0x8a??|0x4e??|0x457?)       echo "Gen11 / QSV 7 (Ice Lake)" ;;
+    0x9a??|0x4c8?|0x46??|0xa7??|0x490?) echo "Gen12 / QSV 8 (Tiger Lake〜Raptor Lake)" ;;
+    0x56??|0x7d??)              echo "Xe-HPG / Xe-LPG / QSV 9 (Arc Alchemist・Meteor Lake・Arrow Lake)" ;;
+    0x64??|0xe2??)              echo "Xe2 / QSV 10 (Lunar Lake・Arc Battlemage)" ;;
+    *)                          echo "不明 (この一覧に無いデバイス ID)" ;;
+  esac
+}
+
 check_dri() {
   for DEV in "${DEVICES[@]}"; do
     node="${DEV##*/}"
@@ -371,6 +388,9 @@ check_dri() {
 
     echo "==== $DEV"
     echo "GPU : ${gpu:-不明} [${vendor:-?}:${devid:-?}] カーネルドライバ ${kdrv:-?} (${slot:-?})"
+    if [ "$vendor" = 0x8086 ] && [ -n "$devid" ]; then
+      echo "世代 : $(intel_gen "$devid") ※デバイス ID からの推定"
+    fi
 
     # VA-API ドライバを選ぶ
     if [ -n "$USER_DRIVER" ]; then
