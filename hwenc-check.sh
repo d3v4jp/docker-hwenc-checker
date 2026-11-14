@@ -375,6 +375,29 @@ intel_gen() {   # intel_gen <デバイス ID (0x....)>
   esac
 }
 
+# HuC ファームウェアを読み込む設定かどうか (カーネルドライバのパラメータから)
+#   低電力の経路 (VDEnc) で CQP 以外のレート制御を使うには HuC が要る
+#   ここで分かるのは設定だけで、実際に読み込めたかは測定の結果から判断する
+huc_conf() {   # huc_conf <カーネルドライバ>
+  local v
+  case "$1" in
+    xe) echo "xe ドライバ (HuC は自動で読み込まれる)" ;;
+    i915)
+      v="$(cat /sys/module/i915/parameters/enable_guc 2>/dev/null)"
+      case "$v" in
+        -1) echo "enable_guc=-1 (自動。読み込むかどうかは世代とカーネルによる)" ;;
+        0)  echo "enable_guc=0 (読み込まない)" ;;
+        1)  echo "enable_guc=1 (GuC だけ。HuC は読み込まない)" ;;
+        2)  echo "enable_guc=2 (HuC を読み込む)" ;;
+        3)  echo "enable_guc=3 (GuC と HuC を読み込む)" ;;
+        "") echo "不明 (/sys/module/i915/parameters/enable_guc を読めない)" ;;
+        *)  echo "enable_guc=$v" ;;
+      esac
+      ;;
+    *) echo "不明 (カーネルドライバ ${1:-?})" ;;
+  esac
+}
+
 check_dri() {
   for DEV in "${DEVICES[@]}"; do
     node="${DEV##*/}"
@@ -390,6 +413,7 @@ check_dri() {
     echo "GPU : ${gpu:-不明} [${vendor:-?}:${devid:-?}] カーネルドライバ ${kdrv:-?} (${slot:-?})"
     if [ "$vendor" = 0x8086 ] && [ -n "$devid" ]; then
       echo "世代 : $(intel_gen "$devid") ※デバイス ID からの推定"
+      echo "HuC : $(huc_conf "$kdrv")"
     fi
 
     # VA-API ドライバを選ぶ
