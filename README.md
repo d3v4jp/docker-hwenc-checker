@@ -147,27 +147,35 @@ Pascal 世代 (GTX 10 系、Quadro P 系) は HEVC の B フレームに対応�
 
 ```
 ==== おすすめのエンコード設定
-方針: 1 パスで画質優先。品質目標型 (ICQ / CQ) を優先し、使えなければ CQP などにする
+方針: 1 パスで画質優先。VA-API では録画向けに、ビットレートに上限を付けた設定 (上限付き) を先に出す
+      次に品質固定型 (ICQ / CQ。使えなければ CQP など) を出す。品質固定型は上限が無いので、
+      動きの激しい映像では元の TS より大きくなることがある
       品質値は小さいほど高画質・大容量 (HEVC 23 / H.264 21。REC_HEVC_Q / REC_H264_Q で変えられる)
       ここに出した設定は、この GPU で実際にエンコードが通ったもの
 
 -- VA-API (/dev/dri/renderD128)
+  録画向け: 上限付き (ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):
+  HEVC GR    : -c:v hevc_vaapi -rc_mode VBR -b:v 6M -maxrate 9M -bufsize 18M -compression_level 4 -bf 2
+  HEVC BS/CS : -c:v hevc_vaapi -rc_mode VBR -b:v 8M -maxrate 12M -bufsize 24M -compression_level 4 -bf 2
+               (HEVC は QVBR の品質値が無視されるため VBR にした。容量は -b:v の目標でほぼ決まる)
+  H.264 GR   : -c:v h264_vaapi -rc_mode QVBR -global_quality 21 -b:v 8M -maxrate 10M -bufsize 20M -compression_level 4 -bf 2
+  H.264 BS/CS: -c:v h264_vaapi -rc_mode QVBR -global_quality 21 -b:v 11M -maxrate 14M -bufsize 28M -compression_level 4 -bf 2
+  品質固定 (上限なし。動きの激しい映像では元の TS より大きくなることがある):
   HEVC       : -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2
+               経路: 通常 (VME)
   HEVC(10bit): -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -profile:v main10
   H.264      : -c:v h264_vaapi -rc_mode ICQ -global_quality 21 -compression_level 4 -bf 2
+               経路: 通常 (VME)
   コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):
+    # HEVC GR 上限付き(インターレース解除)
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v hevc_vaapi -rc_mode VBR -b:v 6M -maxrate 9M -bufsize 18M -compression_level 4 -bf 2 -c:a copy output.mkv
+    ...
     # HEVC
     ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -c:a copy output.mkv
-    # HEVC(10bit)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=p010,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
-    # H.264
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v h264_vaapi -rc_mode ICQ -global_quality 21 -compression_level 4 -bf 2 -c:a copy output.mkv
+    ...
     # HEVC(インターレース解除)
     ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -c:a copy output.mkv
-    # HEVC(10bit, インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=p010' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
-    # H.264(インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v h264_vaapi -rc_mode ICQ -global_quality 21 -compression_level 4 -bf 2 -c:a copy output.mkv
+    ...
 
 -- NVENC (GPU 0)
   HEVC       : -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 24 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8
@@ -185,15 +193,16 @@ Pascal 世代 (GTX 10 系、Quadro P 系) は HEVC の B フレームに対応�
     ...
 ```
 
-選び方は、録画のアーカイブのように「1 パスで、多少大きくなっても画質を優先する」用途を想定しています。
+選び方は、放送の録画を 1 パスで圧縮する用途を想定しています。
 
+- VA-API では、ファイルの大きさが読める「上限付き」を先に出します。品質固定型 (ICQ など) は楽な場面ではとても小さくなりますが、上限が無いので、動きの激しい場面では元の TS を超えることがあります。地上波の鉄道の前面展望 (55 分) で 30 秒ずつ 6 か所を比べたところ、HEVC の ICQ 23 は 2〜27Mbps と場面で大きく変わり、合計は上限付き (目標 6M・上限 9M) の約 2.5 倍でした。上限付きはどの場面でもほぼ 6Mbps でした。上限付きを出すのは、今のところ VA-API だけです
 - コマンドは、そのままコピペして使える形で出します (`input.ts` と `output.mkv` だけ書き換える)。HEVC が 10bit でも通る GPU では、10bit 用のコマンドも出します
 - 使えないものは設定を出さず、各セクションの最初に「HEVC は使えないので出力しません。」「10bit エンコードは使えないので出力しません。」のように1行で書きます
 - 放送の録画などインターレースの素材向けに、インターレース解除つきのコマンドも出します。VA-API は GPU の `deinterlace_vaapi`、QSV と NVENC は CPU の `bwdif` を使い、どれも 60i を 30p にします。これも実際に通ったものだけを出します
 - コーデックは HEVC と H.264 を出します。AV1 がエンコードできる GPU では、そのことも書きます (品質値の尺度が違うので、値は出しません)
-- レート制御は、品質目標型 (VA-API / QSV は ICQ、NVENC は `-rc vbr -cq`) を優先します。使えないとき (VA-API では、通っても品質値が無視されるときも含む) は VA-API は QVBR → CQP → VBR、QSV は CQP → VBR、NVENC は CQP の順に落とします。CQP にするときは、I / B フレームの QP が P フレームから大きくずれないようオフセットを指定します
+- 品質固定型のレート制御は、品質目標型 (VA-API / QSV は ICQ、NVENC は `-rc vbr -cq`) を優先します。使えないとき (VA-API では、通っても品質値が無視されるときも含む) は VA-API は QVBR → CQP → VBR、QSV は CQP → VBR、NVENC は CQP の順に落とします。CQP にするときは、I / B フレームの QP が P フレームから大きくずれないようオフセットを指定します
 - VA-API は `-low_power` を付けない経路を優先し、通らないときだけ `-low_power 0` / `1` を付けます。どちらの経路 (通常の VME / 低電力の VDEnc) で動いたかも出します
-- VA-API では、ビットレートに上限を付けた QVBR の設定 (「上限付き」) も出します。地上波 (GR、1440x1080) と BS/CS (1920x1080) ごとに、エンコード後のファイルが元の TS の 2/3 程度に収まる目標と上限にしています (HEVC: GR 6M / 9M、BS/CS 8M / 12M、H.264: GR 8M / 10M、BS/CS 11M / 14M)。これも実際に通ったものだけを出します。QVBR の品質値が無視される GPU では、同じ目標と上限の VBR を出します (QVBR も実際には VBR と同じ動きになるため)
+- 上限付きは、品質値が効く QVBR を優先します。地上波 (GR、1440x1080) と BS/CS (1920x1080) ごとに、エンコード後のファイルが元の TS の 2/3 程度に収まる目標と上限にしています (HEVC: GR 6M / 9M、BS/CS 8M / 12M、H.264: GR 8M / 10M、BS/CS 11M / 14M)。これも実際に通ったものだけを出します。QVBR の品質値が無視される GPU では、同じ目標と上限の VBR を出します (QVBR も実際には VBR と同じ動きになるため)
 - 低電力の経路しかないコーデックで CQP しか通らないときは、HuC が読み込まれていないと判断します。この場合、ICQ や上限付きの設定は確かめられないので出さず、HuC を有効にして (i915 なら `i915.enable_guc=2`) 測定し直すよう案内します
 - NVENC は、表で OK だった機能 (B フレーム、B フレーム参照、lookahead、空間 AQ、時間 AQ) を足します。multipass は設定には含めず、使える GPU では `-multipass qres` を足せることを1行添えます。NVENC の multipass は 1 回のエンコードの中でフレームを 2 回解析する方式で、速度への影響は GPU とプリセットによります (重いプリセットではほとんど遅くならない計測もあります)
 - `-compression_level 4` や `-preset slow` などの追加オプションは、通る組み合わせを順に試して選びます。出した設定は、同じ GPU で実際にエンコードが通ったものだけです

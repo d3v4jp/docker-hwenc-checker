@@ -560,12 +560,14 @@ squash() { tr -s ' ' <<<"$*" | sed 's/^ //; s/ $//'; }   # 余分な空白を詰
 
 # コピペ用のコマンドをためておき、各セクションの最後にまとめて出す
 # インターレース解除つきのコマンドは、通常のコマンドの後ろにまとめて出す
-EX_LBL=() EX_CMD=() DEI_LBL=() DEI_CMD=()
+EX_LBL=() EX_CMD=() DEI_LBL=() DEI_CMD=() CAP_LBL=() CAP_CMD=()
 ex_add() { EX_LBL+=("$1"); EX_CMD+=("$(squash "$2")"); }
 dei_add() { DEI_LBL+=("$1"); DEI_CMD+=("$(squash "$2")"); }
+cap_add() { CAP_LBL+=("$1"); CAP_CMD+=("$(squash "$2")"); }
 ex_print() {
   local i
-  EX_LBL+=("${DEI_LBL[@]}") EX_CMD+=("${DEI_CMD[@]}")
+  # 上限付き → 品質固定 → インターレース解除つきの品質固定 の順に出す
+  EX_LBL=("${CAP_LBL[@]}" "${EX_LBL[@]}" "${DEI_LBL[@]}") EX_CMD=("${CAP_CMD[@]}" "${EX_CMD[@]}" "${DEI_CMD[@]}")
   if [ ${#EX_CMD[@]} -gt 0 ]; then
     echo "  コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):"
     for i in "${!EX_CMD[@]}"; do
@@ -573,7 +575,7 @@ ex_print() {
       echo "    ${EX_CMD[$i]}"
     done
   fi
-  EX_LBL=() EX_CMD=() DEI_LBL=() DEI_CMD=()
+  EX_LBL=() EX_CMD=() DEI_LBL=() DEI_CMD=() CAP_LBL=() CAP_CMD=()
 }
 
 # インターレース解除のフィルタ。VA-API は GPU の deinterlace_vaapi、QSV と NVENC は CPU の bwdif を使う
@@ -659,6 +661,9 @@ rec_vaapi() {
   DEV="$dev"
   echo "-- VA-API ($dev)"
   if ! rec_notice "va|$dev"; then echo; return; fi
+  # 録画で使われることが多いので、ファイルの大きさが読める上限付きを先に出す
+  rec_vaapi_cap "$dev"
+  echo "  品質固定 (上限なし。動きの激しい映像では元の TS より大きくなることがある):"
   for name in HEVC H.264; do
     avail "va|$dev|$name|" || continue
     case "$name" in
@@ -724,7 +729,6 @@ rec_vaapi() {
   if [ "${RES["va|$dev|AV1|auto|ICQ"]:-}" = OK ] || [ "${RES["va|$dev|AV1|auto|CQP"]:-}" = OK ]; then
     echo "  AV1 もエンコードできる (av1_vaapi。品質値の尺度が HEVC と違うので、値は試して決める)"
   fi
-  rec_vaapi_cap "$dev"
   ex_print
   if [ "$huc_hint" = 1 ]; then
     echo "  HuC を有効にしてから測定し直すと、ICQ と上限付きの設定も確かめられる:"
@@ -743,7 +747,7 @@ rec_vaapi() {
 # どちらも表で OK だった経路で、実際にエンコードが通ったものだけを出す
 rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
   local dev="$1" r label name tgt max enc q lp lp_opt rc base extra line shown=0 note=""
-  local head="  上限付き (ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
+  local head="  録画向け: 上限付き (ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
   for r in "${VA_CAP_ROWS[@]}"; do
     IFS='|' read -r label name tgt max <<<"$r"
     # 注記は、対象のコーデックの行が終わったところに出す
@@ -768,7 +772,7 @@ rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
           [ "$shown" = 0 ] && { echo "$head"; shown=1; }
           line="-c:v $enc $extra"
           rec_line "$label" "$line"
-          dei_add "$label 上限付き(インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_8' $line -c:a copy output.mkv"
+          cap_add "$label 上限付き(インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_8' $line -c:a copy output.mkv"
           [ "$rc" = VBR ] && va_q_ign_any "$dev" "$name" QVBR && note="$name"
           line=ok
           break 2
@@ -782,7 +786,7 @@ rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
   done
   [ -n "$note" ] && va_cap_note "$note"
   if [ "$shown" = 0 ]; then
-    echo "  上限付き: この GPU では QVBR も VBR も通らなかった"
+    echo "  録画向け (上限付き): この GPU では QVBR も VBR も通らなかった"
   fi
 }
 
@@ -918,7 +922,9 @@ recommend() {
   local d g
   echo
   echo "==== おすすめのエンコード設定"
-  echo "方針: 1 パスで画質優先。品質目標型 (ICQ / CQ) を優先し、使えなければ CQP などにする"
+  echo "方針: 1 パスで画質優先。VA-API では録画向けに、ビットレートに上限を付けた設定 (上限付き) を先に出す"
+  echo "      次に品質固定型 (ICQ / CQ。使えなければ CQP など) を出す。品質固定型は上限が無いので、"
+  echo "      動きの激しい映像では元の TS より大きくなることがある"
   echo "      品質値は小さいほど高画質・大容量 (HEVC $REC_HEVC_Q / H.264 $REC_H264_Q。REC_HEVC_Q / REC_H264_Q で変えられる)"
   echo "      ここに出した設定は、この GPU で実際にエンコードが通ったもの"
   echo
