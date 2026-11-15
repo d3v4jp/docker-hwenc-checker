@@ -96,7 +96,7 @@ VA_DONE=() QSV_DONE=() NV_DONE=()
 
 # ---- 表の出力 ----
 COLS=(CQP CBR VBR ICQ QVBR AVBR)
-QSV_COLS=(CQP ICQ VBR CBR)
+QSV_COLS=(CQP ICQ VBR QVBR CBR)
 row() { printf '%-12s' "$1"; shift; printf ' %-9s' "$1"; shift; printf ' %-5s' "$@"; echo; }
 
 # ---- VA-API ----
@@ -244,6 +244,7 @@ qsv_rc_opts() {
     CQP) echo "-q:v 26" ;;
     ICQ) echo "-global_quality 26" ;;
     VBR) echo "-b:v 6M -maxrate 9M" ;;
+    QVBR) echo "-global_quality 26 -b:v 6M -maxrate 9M" ;;
     CBR) echo "-b:v 6M -maxrate 6M" ;;
   esac
 }
@@ -256,10 +257,31 @@ qsv_cell() {   # qsv_cell <エンコーダ> <pix_fmt> <レート制御> [追加�
              -init_hw_device "qsv=qs:hw,child_device=$DEV" -filter_hw_device qs \
              -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 10 \
              -vf "format=$fmt" -c:v "$enc" $(qsv_rc_opts "$rc") "$@" -f null - 2>&1); then
-    if grep -i ratecontrol <<<"$log" | grep -w "$rc" >/dev/null; then echo OK; else echo 'OK*'; fi
+    if grep -i ratecontrol <<<"$log" | grep -F "($rc)" >/dev/null; then echo OK; else echo 'OK*'; fi
   else
     echo NG
   fi
+}
+
+qsv_size() {   # qsv_size <エンコーダ> <pix_fmt> [オプション...]  → 出力のバイト数
+  local enc="$1" fmt="$2" out rc=0; shift 2
+  out="$(mktemp)"
+  ffmpeg -hide_banner -nostdin -v error -y \
+    -init_hw_device "qsv=qs:hw,child_device=$DEV" -filter_hw_device qs \
+    -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 30 \
+    -vf "format=$fmt" -c:v "$enc" "$@" -f mpegts "$out" >/dev/null 2>&1 \
+    && stat -c %s "$out" || rc=1
+  rm -f "$out"
+  return "$rc"
+}
+
+# VA-API の va_q_ignored と同じく、品質値を 15 と 35 にしてサイズを比べる
+qsv_q_ignored() {   # qsv_q_ignored <エンコーダ> <pix_fmt> <ICQ|QVBR>
+  local enc="$1" fmt="$2" rc="$3" a b rate=()
+  [ "$rc" = QVBR ] && rate=(-b:v 6M -maxrate 9M)
+  a=$(qsv_size "$enc" "$fmt" -global_quality 15 "${rate[@]}") || return 1
+  b=$(qsv_size "$enc" "$fmt" -global_quality 35 "${rate[@]}") || return 1
+  [ $(( (a > b ? a - b : b - a) * 100 )) -lt $(( (a > b ? a : b) * 2 )) ]
 }
 
 QSV_ROWS=(
@@ -273,7 +295,7 @@ QSV_ROWS=(
 )
 
 qsv_check() {
-  local name enc fmt extra rc cells
+  local name enc fmt extra rc cells q_notes=()
   echo "-- QSV エンコード (ffmpeg で実際に試した結果)"
   local rt=() libs
   libs="$(ldconfig -p 2>/dev/null)"   # grep -q でパイプを途中で閉じると pipefail で失敗扱いになるので、先に読み込む
@@ -301,7 +323,23 @@ qsv_check() {
       [ "${cells[-1]}" != NG ] && any_ok=1
     done
     row "$name" "" "${cells[@]}"
+    # ICQ / QVBR は、品質値が実際に効くかも確かめる (おすすめ設定で使う HEVC と H.264 だけ)
+    case "$name" in HEVC|H.264) ;; *) continue ;; esac
+    for rc in ICQ QVBR; do
+      [ "${RES["qsv|$DEV|$name|$rc"]:-}" = OK ] || continue
+      if qsv_q_ignored "$enc" "$fmt" "$rc"; then
+        RES["qsv|$DEV|$name|$rc|q"]=ignored
+        case "$rc" in
+          ICQ)  q_notes+=("$name: ICQ は通るが品質値が無視される") ;;
+          QVBR) q_notes+=("$name: QVBR は通るが品質値が無視される (容量は -b:v の目標で決まる)") ;;
+        esac
+      fi
+    done
   done
+  if [ "${#q_notes[@]}" -gt 0 ]; then
+    echo "  ※ 品質値を 15 と 35 にしてサイズを比べた結果:"
+    printf '    %s\n' "${q_notes[@]}"
+  fi
   if [ "$any_ok" = 0 ]; then
     if grep -q 'libmfxhw64\.so' <<<"$libs"; then
       echo "QSV が全部 NG: ランタイムはあるが、この GPU では開けなかった (VA-API のドライバも確認する)"
@@ -646,9 +684,9 @@ va_q_ign_any() {   # va_q_ign_any <レンダーノード> <コーデック> <ICQ
   return 1
 }
 
-# 上限付きの目標と上限 [Mbps]
+# 上限付きの目標と上限 [Mbps] (VA-API と QSV で共通)
 #   名前 | コーデック | 目標 | 上限
-VA_CAP_ROWS=(
+CAP_ROWS=(
   "HEVC GR|HEVC|6|9"
   "HEVC BS/CS|HEVC|8|12"
   "H.264 GR|H.264|8|10"
@@ -748,10 +786,10 @@ rec_vaapi() {
 rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
   local dev="$1" r label name tgt max enc q lp lp_opt rc base extra line shown=0 note=""
   local head="  録画向け: 上限付き (ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
-  for r in "${VA_CAP_ROWS[@]}"; do
+  for r in "${CAP_ROWS[@]}"; do
     IFS='|' read -r label name tgt max <<<"$r"
     # 注記は、対象のコーデックの行が終わったところに出す
-    if [ -n "$note" ] && [ "$note" != "$name" ]; then va_cap_note "$note"; note=""; fi
+    if [ -n "$note" ] && [ "$note" != "$name" ]; then cap_note "$note"; note=""; fi
     case "$name" in
       HEVC)  enc=hevc_vaapi q="$REC_HEVC_Q" ;;
       H.264) enc=h264_vaapi q="$REC_H264_Q" ;;
@@ -784,24 +822,28 @@ rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
       rec_line "$label" "(HuC が読み込まれていないため確かめられない。下の手順で HuC を有効にして測定し直す)"
     fi
   done
-  [ -n "$note" ] && va_cap_note "$note"
+  [ -n "$note" ] && cap_note "$note"
   if [ "$shown" = 0 ]; then
     echo "  録画向け (上限付き): この GPU では QVBR も VBR も通らなかった"
   fi
 }
 
-va_cap_note() {   # va_cap_note <コーデック>
+cap_note() {   # cap_note <コーデック>
   echo "               ($1 は QVBR の品質値が無視されるため VBR にした。容量は -b:v の目標でほぼ決まる)"
 }
 
-qsv_run() {   # qsv_run <エンコーダ> <pix_fmt> <ICQ を確かめるか 0/1> [オプション...]
-  local enc="$1" fmt="$2" want_icq="$3" log; shift 3
+qsv_run() {   # qsv_run <エンコーダ> <pix_fmt> <確かめるレート制御 (ICQ / QVBR / VBR) か 0> [オプション...]
+  local enc="$1" fmt="$2" want="$3" log pat; shift 3
   log=$(ffmpeg -hide_banner -nostdin -v verbose \
           -init_hw_device "qsv=qs:hw,child_device=$DEV" -filter_hw_device qs \
           -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 10 \
           -vf "${QSV_VF:-format=$fmt}" -c:v "$enc" "$@" -f null - 2>&1) || return 1
-  [ "$want_icq" = 0 ] && return 0
-  grep -i ratecontrol <<<"$log" | grep -E '\b(LA_)?ICQ\b' >/dev/null
+  case "$want" in
+    0)   return 0 ;;
+    ICQ) pat='\((LA_)?ICQ\)' ;;
+    *)   pat="\\($want\\)" ;;
+  esac
+  grep -i ratecontrol <<<"$log" | grep -E "$pat" >/dev/null
 }
 
 rec_qsv() {
@@ -810,6 +852,8 @@ rec_qsv() {
   DEV="$dev"
   echo "-- QSV ($dev)"
   if ! rec_notice "qsv|$dev"; then echo; return; fi
+  rec_qsv_cap "$dev"
+  echo "  品質固定 (上限なし。動きの激しい映像では元の TS より大きくなることがある):"
   for name in HEVC H.264; do
     avail "qsv|$dev|$name|" || continue
     case "$name" in
@@ -819,9 +863,11 @@ rec_qsv() {
     line=""
     for rc in ICQ CQP VBR; do
       [ "${RES["qsv|$dev|$name|$rc"]:-}" = OK ] || continue
+      # 品質値が無視される ICQ は、品質目標型として使えないので飛ばす
+      [ "${RES["qsv|$dev|$name|$rc|q"]:-}" = ignored ] && continue
       want=0
       case "$rc" in
-        ICQ) rc_opt="-global_quality $q"; want=1 ;;
+        ICQ) rc_opt="-global_quality $q"; want=ICQ ;;
         CQP) rc_opt="-q:v $((q - 1))" ;;
         VBR) rc_opt="-b:v 8M -maxrate 15M" ;;
       esac
@@ -829,7 +875,13 @@ rec_qsv() {
                    "$rc_opt -preset slow -extbrc 1 -look_ahead_depth 40" "$rc_opt -preset slow" "$rc_opt"); then
         line="-c:v $enc $extra"
         rec_line "$name" "$line"
-        [ "$rc" != ICQ ] && echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+        if [ "$rc" != ICQ ]; then
+          if [ "${RES["qsv|$dev|$name|ICQ|q"]:-}" = ignored ]; then
+            echo "               ($rc を使用。ICQ は通るが品質値が無視される)"
+          else
+            echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+          fi
+        fi
         ex_add "$name" "ffmpeg -init_hw_device qsv=qs:hw,child_device=$dev -i input.ts -vf format=nv12 $line -c:a copy output.mkv"
         # shellcheck disable=SC2086
         if QSV_VF="$SW_DEI_8" qsv_run "$enc" nv12 0 $extra; then
@@ -853,6 +905,48 @@ rec_qsv() {
   done
   ex_print
   echo
+}
+
+# 上限付きの設定 (QSV)。QVBR (品質値が効くもの) を優先し、無ければ VBR にする
+rec_qsv_cap() {   # rec_qsv_cap <レンダーノード>
+  local dev="$1" r label name tgt max enc q rc base extra line shown=0 note=""
+  local head="  録画向け: 上限付き (ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
+  for r in "${CAP_ROWS[@]}"; do
+    IFS='|' read -r label name tgt max <<<"$r"
+    if [ -n "$note" ] && [ "$note" != "$name" ]; then cap_note "$note"; note=""; fi
+    case "$name" in
+      HEVC)  enc=hevc_qsv q="$REC_HEVC_Q" ;;
+      H.264) enc=h264_qsv q="$REC_H264_Q" ;;
+    esac
+    line=""
+    for rc in QVBR VBR; do
+      [ "${RES["qsv|$dev|$name|$rc"]:-}" = OK ] || continue
+      [ "${RES["qsv|$dev|$name|$rc|q"]:-}" = ignored ] && continue
+      case "$rc" in
+        QVBR) base="-global_quality $q" ;;
+        VBR)  base="" ;;
+      esac
+      base="$base -b:v ${tgt}M -maxrate ${max}M -bufsize $((max * 2))M"
+      # 狙いのレート制御で動いたものだけを使う (extbrc などで別の方式に変わることがあるため)
+      if extra=$(first_ok qsv_run 3 "$enc" nv12 "$rc" -- \
+                   "$base -preset slow -extbrc 1 -look_ahead_depth 40" "$base -preset slow" "$base"); then
+        [ "$shown" = 0 ] && { echo "$head"; shown=1; }
+        line="-c:v $enc $extra"
+        rec_line "$label" "$line"
+        # shellcheck disable=SC2086
+        if QSV_VF="$SW_DEI_8" qsv_run "$enc" nv12 0 $extra; then
+          cap_add "$label 上限付き(インターレース解除)" "ffmpeg -init_hw_device qsv=qs:hw,child_device=$dev -i input.ts -vf $SW_DEI_8 $line -c:a copy output.mkv"
+        fi
+        [ "$rc" = VBR ] && [ "${RES["qsv|$dev|$name|QVBR|q"]:-}" = ignored ] && note="$name"
+        line=ok
+        break
+      fi
+    done
+  done
+  [ -n "$note" ] && cap_note "$note"
+  if [ "$shown" = 0 ]; then
+    echo "  録画向け (上限付き): この GPU では QVBR も VBR も通らなかった"
+  fi
 }
 
 rec_nvenc() {
@@ -922,7 +1016,7 @@ recommend() {
   local d g
   echo
   echo "==== おすすめのエンコード設定"
-  echo "方針: 1 パスで画質優先。VA-API では録画向けに、ビットレートに上限を付けた設定 (上限付き) を先に出す"
+  echo "方針: 1 パスで画質優先。VA-API と QSV では録画向けに、ビットレートに上限を付けた設定 (上限付き) を先に出す"
   echo "      次に品質固定型 (ICQ / CQ。使えなければ CQP など) を出す。品質固定型は上限が無いので、"
   echo "      動きの激しい映像では元の TS より大きくなることがある"
   echo "      品質値は小さいほど高画質・大容量 (HEVC $REC_HEVC_Q / H.264 $REC_H264_Q。REC_HEVC_Q / REC_H264_Q で変えられる)"
