@@ -152,22 +152,22 @@ Pascal 世代 (GTX 10 系、Quadro P 系) は HEVC の B フレームに対応�
       ここに出した設定は、この GPU で実際にエンコードが通ったもの
 
 -- VA-API (/dev/dri/renderD128)
-  HEVC       : -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2
-  HEVC(10bit): -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -profile:v main10
-  H.264      : -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 1 -bf 2
+  HEVC       : -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2
+  HEVC(10bit): -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -profile:v main10
+  H.264      : -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 4 -bf 2
   コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):
     # HEVC
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -c:a copy output.mkv
     # HEVC(10bit)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=p010,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -profile:v main10 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=p010,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
     # H.264
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 1 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 4 -bf 2 -c:a copy output.mkv
     # HEVC(インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -c:a copy output.mkv
     # HEVC(10bit, インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=p010' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 1 -bf 2 -profile:v main10 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=p010' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
     # H.264(インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 1 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 4 -bf 2 -c:a copy output.mkv
 
 -- NVENC (GPU 0)
   HEVC       : -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 23 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8
@@ -196,7 +196,8 @@ Pascal 世代 (GTX 10 系、Quadro P 系) は HEVC の B フレームに対応�
 - VA-API では、ビットレートに上限を付けた QVBR の設定 (「上限付き」) も出します。地上波 (GR、1440x1080) と BS/CS (1920x1080) ごとに、エンコード後のファイルが元の TS の 2/3 程度に収まる目標と上限にしています (HEVC: GR 6M / 9M、BS/CS 8M / 12M、H.264: GR 8M / 10M、BS/CS 11M / 14M)。これも実際に通ったものだけを出します。QVBR の品質値が無視される GPU では、同じ目標と上限の VBR を出します (QVBR も実際には VBR と同じ動きになるため)
 - 低電力の経路しかないコーデックで CQP しか通らないときは、HuC が読み込まれていないと判断します。この場合、ICQ や上限付きの設定は確かめられないので出さず、HuC を有効にして (i915 なら `i915.enable_guc=2`) 測定し直すよう案内します
 - NVENC は、表で OK だった機能 (B フレーム、B フレーム参照、lookahead、空間 AQ、時間 AQ) を足します。multipass は設定には含めず、使える GPU では `-multipass qres` を足せることを1行添えます。NVENC の multipass は 1 回のエンコードの中でフレームを 2 回解析する方式で、速度への影響は GPU とプリセットによります (重いプリセットではほとんど遅くならない計測もあります)
-- `-compression_level 1` や `-preset slow` などの追加オプションは、通る組み合わせを順に試して選びます。出した設定は、同じ GPU で実際にエンコードが通ったものだけです
+- `-compression_level 4` や `-preset slow` などの追加オプションは、通る組み合わせを順に試して選びます。出した設定は、同じ GPU で実際にエンコードが通ったものだけです
+- VA-API の `-compression_level` は 4 (速度と画質の釣り合い) にしています。1 にすると少し画質が上がりますが、通常の経路 (VME) では動き探索を GPU の演算ユニット (Render/3D) でするため、省電力の CPU では大きく遅くなります (Core i5-7Y54 の HEVC で、4 は 1 の約 1.8 倍の速さ。容量はほぼ同じ)。速度に余裕があるなら 1 に変えても構いません
 
 ### 記号
 

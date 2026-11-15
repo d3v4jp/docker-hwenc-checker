@@ -681,8 +681,10 @@ rec_vaapi() {
           VBR)  rc_opt="-rc_mode VBR -b:v 8M -maxrate 15M" ;;
         esac
         base="$lp_opt $rc_opt"
+        # compression_level は 4 (速度と画質の釣り合い)。1 は少し画質が上がるが、通常の経路 (VME) では
+        # 動き探索を GPU の演算ユニットでするため、省電力の CPU では 2 倍近く遅くなることがある
         # shellcheck disable=SC2086
-        if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 1 -bf 2" "$base -bf 2" "$base -compression_level 1" "$base"); then
+        if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 4 -bf 2" "$base -bf 2" "$base -compression_level 4" "$base"); then
           line="-c:v $enc $extra"
           rec_line "$name" "$line"
           echo "               経路: $(va_path "$dev" "$name" "$lp")"
@@ -760,7 +762,7 @@ rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
         esac
         base="$base -b:v ${tgt}M -maxrate ${max}M -bufsize $((max * 2))M"
         # shellcheck disable=SC2086
-        if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 1 -bf 2" "$base -bf 2" "$base -compression_level 1" "$base"); then
+        if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 4 -bf 2" "$base -bf 2" "$base -compression_level 4" "$base"); then
           [ "$shown" = 0 ] && { echo "$head"; shown=1; }
           line="-c:v $enc $extra"
           rec_line "$label" "$line"
