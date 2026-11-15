@@ -742,10 +742,12 @@ rec_vaapi() {
 # 上限付きの設定。QVBR (品質値が効くもの) を優先し、無ければ VBR にする
 # どちらも表で OK だった経路で、実際にエンコードが通ったものだけを出す
 rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
-  local dev="$1" r label name tgt max enc q lp lp_opt rc base extra line shown=0 vbr_note=0
+  local dev="$1" r label name tgt max enc q lp lp_opt rc base extra line shown=0 note=""
   local head="  上限付き (ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
   for r in "${VA_CAP_ROWS[@]}"; do
     IFS='|' read -r label name tgt max <<<"$r"
+    # 注記は、対象のコーデックの行が終わったところに出す
+    if [ -n "$note" ] && [ "$note" != "$name" ]; then va_cap_note "$note"; note=""; fi
     case "$name" in
       HEVC)  enc=hevc_vaapi q="$REC_HEVC_Q" ;;
       H.264) enc=h264_vaapi q="$REC_H264_Q" ;;
@@ -767,7 +769,7 @@ rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
           line="-c:v $enc $extra"
           rec_line "$label" "$line"
           dei_add "$label 上限付き(インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_8' $line -c:a copy output.mkv"
-          [ "$rc" = VBR ] && va_q_ign_any "$dev" "$name" QVBR && vbr_note=1
+          [ "$rc" = VBR ] && va_q_ign_any "$dev" "$name" QVBR && note="$name"
           line=ok
           break 2
         fi
@@ -778,11 +780,14 @@ rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
       rec_line "$label" "(HuC が読み込まれていないため確かめられない。下の手順で HuC を有効にして測定し直す)"
     fi
   done
+  [ -n "$note" ] && va_cap_note "$note"
   if [ "$shown" = 0 ]; then
     echo "  上限付き: この GPU では QVBR も VBR も通らなかった"
-  elif [ "$vbr_note" = 1 ]; then
-    echo "               (QVBR は品質値が無視されるため VBR にした。容量は -b:v の目標でほぼ決まる)"
   fi
+}
+
+va_cap_note() {   # va_cap_note <コーデック>
+  echo "               ($1 は QVBR の品質値が無視されるため VBR にした。容量は -b:v の目標でほぼ決まる)"
 }
 
 qsv_run() {   # qsv_run <エンコーダ> <pix_fmt> <ICQ を確かめるか 0/1> [オプション...]
