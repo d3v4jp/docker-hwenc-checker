@@ -117,6 +117,29 @@ va_try() {   # va_try <エンコーダ> <pix_fmt> [オプション...]
     -vf "${VA_VF:-format=$fmt,hwupload}" -c:v "$enc" "$@" -f null - >/dev/null 2>&1
 }
 
+va_size() {   # va_size <エンコーダ> <pix_fmt> [オプション...]  → 出力のバイト数
+  local enc="$1" fmt="$2" out rc=0; shift 2
+  out="$(mktemp)"
+  ffmpeg -hide_banner -nostdin -v error -y \
+    -init_hw_device "vaapi=va:$DEV" -filter_hw_device va \
+    -f lavfi -i "testsrc2=size=$SIZE:rate=30" -frames:v 30 \
+    -vf "format=$fmt,hwupload" -c:v "$enc" "$@" -f mpegts "$out" >/dev/null 2>&1 \
+    && stat -c %s "$out" || rc=1
+  rm -f "$out"
+  return "$rc"
+}
+
+# 品質値を 15 と 35 にしてサイズを比べ、ほぼ同じなら品質値が無視されていると判断する
+# (エラーにならなくても、ドライバが品質値を捨てて目標ビットレートだけで動くことがある)
+va_q_ignored() {   # va_q_ignored <エンコーダ> <pix_fmt> <ICQ|QVBR> [オプション...]
+  local enc="$1" fmt="$2" rc="$3" a b rate=()
+  shift 3
+  [ "$rc" = QVBR ] && rate=(-b:v 6M -maxrate 9M)
+  a=$(va_size "$enc" "$fmt" "$@" -rc_mode "$rc" -global_quality 15 "${rate[@]}") || return 1
+  b=$(va_size "$enc" "$fmt" "$@" -rc_mode "$rc" -global_quality 35 "${rate[@]}") || return 1
+  [ $(( (a > b ? a - b : b - a) * 100 )) -lt $(( (a > b ? a : b) * 2 )) ]
+}
+
 va_rc_opts() {   # レート制御ごとのオプション
   case "$1" in
     CQP)  echo "-rc_mode CQP -qp 26" ;;
@@ -142,7 +165,7 @@ VA_ROWS=(
 )
 
 va_check() {
-  local name enc fmt profs extra lp rc cells lp_opts
+  local name enc fmt profs extra lp rc cells lp_opts q_notes=()
   echo "-- VA-API エンコード (ffmpeg で実際に試した結果)"
   row codec low_power "${COLS[@]}"
   for r in "${VA_ROWS[@]}"; do
@@ -184,6 +207,18 @@ va_check() {
         fi
       done
       row "$name" "$lp" "${cells[@]}"
+      # ICQ / QVBR は、品質値が実際に効くかも確かめる (おすすめ設定で使う HEVC と H.264 だけ)
+      case "$name" in HEVC|H.264) ;; *) continue ;; esac
+      for rc in ICQ QVBR; do
+        [ "${RES["va|$DEV|$name|$lp|$rc"]:-}" = OK ] || continue
+        if va_q_ignored "$enc" "$fmt" "$rc" "${lp_opts[@]}"; then
+          RES["va|$DEV|$name|$lp|$rc|q"]=ignored
+          case "$rc" in
+            ICQ)  q_notes+=("$name low_power $lp: ICQ は通るが品質値が無視される") ;;
+            QVBR) q_notes+=("$name low_power $lp: QVBR は通るが品質値が無視される (容量は -b:v の目標で決まる)") ;;
+          esac
+        fi
+      done
     done
   done
   # JPEG はレート制御が無いので、エンコードできるかだけ見る
@@ -195,6 +230,10 @@ va_check() {
     else
       row JPEG auto "NG"
     fi
+  fi
+  if [ "${#q_notes[@]}" -gt 0 ]; then
+    echo "  ※ 品質値を 15 と 35 にしてサイズを比べた結果:"
+    printf '    %s\n' "${q_notes[@]}"
   fi
   echo
 }
@@ -596,7 +635,16 @@ va_huc_missing() {   # va_huc_missing <レンダーノード> <コーデック>
   return 0
 }
 
-# 上限付き (QVBR) の目標と上限 [Mbps]
+# どれかの経路で、レート制御が通るのに品質値が無視されたか
+va_q_ign_any() {   # va_q_ign_any <レンダーノード> <コーデック> <ICQ|QVBR>
+  local lp
+  for lp in auto 0 1; do
+    [ "${RES["va|$1|$2|$lp|$3|q"]:-}" = ignored ] && return 0
+  done
+  return 1
+}
+
+# 上限付きの目標と上限 [Mbps]
 #   名前 | コーデック | 目標 | 上限
 VA_CAP_ROWS=(
   "HEVC GR|HEVC|6|9"
@@ -623,6 +671,8 @@ rec_vaapi() {
     for rc in ICQ QVBR CQP VBR; do
       for lp in auto 0 1; do
         [ "${RES["va|$dev|$name|$lp|$rc"]:-}" = OK ] || continue
+        # 品質値が無視される ICQ / QVBR は、品質目標型として使えないので飛ばす
+        [ "${RES["va|$dev|$name|$lp|$rc|q"]:-}" = ignored ] && continue
         case "$lp" in auto) lp_opt="" ;; *) lp_opt="-low_power $lp" ;; esac
         case "$rc" in
           ICQ)  rc_opt="-rc_mode ICQ -global_quality $q" ;;
@@ -640,7 +690,11 @@ rec_vaapi() {
             echo "               (低電力の経路しかなく、HuC が読み込まれていないため CQP しか使えない)"
             huc_hint=1
           elif [ "$rc" != ICQ ]; then
-            echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+            if va_q_ign_any "$dev" "$name" ICQ; then
+              echo "               ($rc を使用。ICQ は通るが品質値が無視される)"
+            else
+              echo "               ($rc を使用。ICQ はこの GPU では使えない)"
+            fi
           fi
           ex_add "$name" "ffmpeg -vaapi_device $dev -i input.ts -vf 'format=nv12,hwupload' $line -c:a copy output.mkv"
           # shellcheck disable=SC2086
@@ -671,7 +725,7 @@ rec_vaapi() {
   rec_vaapi_cap "$dev"
   ex_print
   if [ "$huc_hint" = 1 ]; then
-    echo "  HuC を有効にしてから測定し直すと、ICQ と上限付き (QVBR) の設定も確かめられる:"
+    echo "  HuC を有効にしてから測定し直すと、ICQ と上限付きの設定も確かめられる:"
     if [ "${KDRV_OF[$dev]:-}" = xe ]; then
       echo "    xe ドライバは HuC を自動で読み込むので、HuC のファームウェア (linux-firmware) が入っているかを確かめる"
     else
@@ -683,42 +737,49 @@ rec_vaapi() {
   echo
 }
 
-# 上限付き (QVBR) の設定。表で QVBR が通った経路で、実際にエンコードが通ったものだけを出す
+# 上限付きの設定。QVBR (品質値が効くもの) を優先し、無ければ VBR にする
+# どちらも表で OK だった経路で、実際にエンコードが通ったものだけを出す
 rec_vaapi_cap() {   # rec_vaapi_cap <レンダーノード>
-  local dev="$1" r label name tgt max enc q lp lp_opt base extra line="" shown=0
+  local dev="$1" r label name tgt max enc q lp lp_opt rc base extra line shown=0 vbr_note=0
+  local head="  上限付き (ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
   for r in "${VA_CAP_ROWS[@]}"; do
     IFS='|' read -r label name tgt max <<<"$r"
     case "$name" in
       HEVC)  enc=hevc_vaapi q="$REC_HEVC_Q" ;;
       H.264) enc=h264_vaapi q="$REC_H264_Q" ;;
     esac
-    for lp in auto 0 1; do
-      [ "${RES["va|$dev|$name|$lp|QVBR"]:-}" = OK ] || continue
-      case "$lp" in auto) lp_opt="" ;; *) lp_opt="-low_power $lp" ;; esac
-      base="$lp_opt -rc_mode QVBR -global_quality $q -b:v ${tgt}M -maxrate ${max}M -bufsize $((max * 2))M"
-      if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 1 -bf 2" "$base -bf 2" "$base -compression_level 1" "$base"); then
-        if [ "$shown" = 0 ]; then
-          echo "  上限付き (QVBR。ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
-          shown=1
+    line=""
+    for rc in QVBR VBR; do
+      for lp in auto 0 1; do
+        [ "${RES["va|$dev|$name|$lp|$rc"]:-}" = OK ] || continue
+        [ "${RES["va|$dev|$name|$lp|$rc|q"]:-}" = ignored ] && continue
+        case "$lp" in auto) lp_opt="" ;; *) lp_opt="-low_power $lp" ;; esac
+        case "$rc" in
+          QVBR) base="$lp_opt -rc_mode QVBR -global_quality $q" ;;
+          VBR)  base="$lp_opt -rc_mode VBR" ;;
+        esac
+        base="$base -b:v ${tgt}M -maxrate ${max}M -bufsize $((max * 2))M"
+        # shellcheck disable=SC2086
+        if extra=$(first_ok va_try 2 "$enc" nv12 -- "$base -compression_level 1 -bf 2" "$base -bf 2" "$base -compression_level 1" "$base"); then
+          [ "$shown" = 0 ] && { echo "$head"; shown=1; }
+          line="-c:v $enc $extra"
+          rec_line "$label" "$line"
+          dei_add "$label 上限付き(インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_8' $line -c:a copy output.mkv"
+          [ "$rc" = VBR ] && va_q_ign_any "$dev" "$name" QVBR && vbr_note=1
+          line=ok
+          break 2
         fi
-        line="-c:v $enc $extra"
-        rec_line "$label" "$line"
-        dei_add "$label 上限付き(インターレース解除)" "ffmpeg -vaapi_device $dev -i input.ts -vf '$VA_DEI_8' $line -c:a copy output.mkv"
-        line="ok"
-        break
-      fi
-      line=""
+      done
     done
-    if [ "${line:-}" != ok ] && va_huc_missing "$dev" "$name"; then
-      if [ "$shown" = 0 ]; then
-        echo "  上限付き (QVBR。ファイルを元の TS の 2/3 程度に収める。GR = 1440x1080、BS/CS = 1920x1080):"
-        shown=1
-      fi
+    if [ "$line" != ok ] && va_huc_missing "$dev" "$name"; then
+      [ "$shown" = 0 ] && { echo "$head"; shown=1; }
       rec_line "$label" "(HuC が読み込まれていないため確かめられない。下の手順で HuC を有効にして測定し直す)"
     fi
   done
   if [ "$shown" = 0 ]; then
-    echo "  上限付き (QVBR): この GPU では QVBR が通らなかった"
+    echo "  上限付き: この GPU では QVBR も VBR も通らなかった"
+  elif [ "$vbr_note" = 1 ]; then
+    echo "               (QVBR は品質値が無視されるため VBR にした。容量は -b:v の目標でほぼ決まる)"
   fi
 }
 
