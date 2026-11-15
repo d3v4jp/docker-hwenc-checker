@@ -16,8 +16,8 @@
 #   NVENC_GPU          調べる NVIDIA GPU の番号 (未指定なら全部調べる)
 #   SIZE               テスト映像の解像度 (既定 1920x1080)
 #   RECOMMEND          1 にすると --recommend と同じ (既定 0)
-#   REC_HEVC_Q         おすすめ設定で使う HEVC の品質値 (既定 22。NVENC の cq は +1)
-#   REC_H264_Q         おすすめ設定で使う H.264 の品質値 (既定 20。NVENC の cq は +1)
+#   REC_HEVC_Q         おすすめ設定で使う HEVC の品質値 (既定 23。NVENC の cq は +1)
+#   REC_H264_Q         おすすめ設定で使う H.264 の品質値 (既定 21。NVENC の cq は +1)
 set -uo pipefail
 
 SIZE="${SIZE:-1920x1080}"
@@ -534,8 +534,8 @@ check_dri() {
 # ---- おすすめ設定 ----
 # 方針: 1 パスで画質優先。品質目標型 (ICQ / CQ) を最優先にし、使えなければ CQP などに落とす
 # 出す設定は、最後に同じ GPU で実際にエンコードして通ったものだけにする
-REC_HEVC_Q="${REC_HEVC_Q:-22}"
-REC_H264_Q="${REC_H264_Q:-20}"
+REC_HEVC_Q="${REC_HEVC_Q:-23}"
+REC_H264_Q="${REC_H264_Q:-21}"
 
 set_driver() {   # set_driver <レンダーノード>
   local d="${DRV_OF[$1]:-}"

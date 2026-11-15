@@ -65,8 +65,8 @@ docker run --rm --gpus all -e NVENC_GPU=1 hwenc-check nvenc
 | `NVENC_GPU` | 調べる NVIDIA GPU の番号 | 全部 |
 | `SIZE` | テスト映像の解像度 | `1920x1080` |
 | `RECOMMEND` | `1` で `--recommend` と同じ。`--no-recommend` を付けると引数が優先 | `0` |
-| `REC_HEVC_Q` | おすすめ設定で使う HEVC の品質値 (NVENC の cq はこれに +1) | `22` |
-| `REC_H264_Q` | おすすめ設定で使う H.264 の品質値 (NVENC の cq はこれに +1) | `20` |
+| `REC_HEVC_Q` | おすすめ設定で使う HEVC の品質値 (NVENC の cq はこれに +1) | `23` |
+| `REC_H264_Q` | おすすめ設定で使う H.264 の品質値 (NVENC の cq はこれに +1) | `21` |
 
 ビルド時に `--build-arg BASE_IMAGE=...` でベースイメージを変えられます (既定 `debian:trixie-slim`)。
 
@@ -148,35 +148,35 @@ Pascal 世代 (GTX 10 系、Quadro P 系) は HEVC の B フレームに対応�
 ```
 ==== おすすめのエンコード設定
 方針: 1 パスで画質優先。品質目標型 (ICQ / CQ) を優先し、使えなければ CQP などにする
-      品質値は小さいほど高画質・大容量 (HEVC 22 / H.264 20。REC_HEVC_Q / REC_H264_Q で変えられる)
+      品質値は小さいほど高画質・大容量 (HEVC 23 / H.264 21。REC_HEVC_Q / REC_H264_Q で変えられる)
       ここに出した設定は、この GPU で実際にエンコードが通ったもの
 
 -- VA-API (/dev/dri/renderD128)
-  HEVC       : -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2
-  HEVC(10bit): -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -profile:v main10
-  H.264      : -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 4 -bf 2
+  HEVC       : -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2
+  HEVC(10bit): -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -profile:v main10
+  H.264      : -c:v h264_vaapi -rc_mode ICQ -global_quality 21 -compression_level 4 -bf 2
   コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):
     # HEVC
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -c:a copy output.mkv
     # HEVC(10bit)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=p010,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=p010,hwupload' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
     # H.264
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 4 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload' -c:v h264_vaapi -rc_mode ICQ -global_quality 21 -compression_level 4 -bf 2 -c:a copy output.mkv
     # HEVC(インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -c:a copy output.mkv
     # HEVC(10bit, インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=p010' -c:v hevc_vaapi -rc_mode ICQ -global_quality 22 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame,scale_vaapi=format=p010' -c:v hevc_vaapi -rc_mode ICQ -global_quality 23 -compression_level 4 -bf 2 -profile:v main10 -c:a copy output.mkv
     # H.264(インターレース解除)
-    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v h264_vaapi -rc_mode ICQ -global_quality 20 -compression_level 4 -bf 2 -c:a copy output.mkv
+    ffmpeg -vaapi_device /dev/dri/renderD128 -i input.ts -vf 'format=nv12,hwupload,deinterlace_vaapi=rate=frame' -c:v h264_vaapi -rc_mode ICQ -global_quality 21 -compression_level 4 -bf 2 -c:a copy output.mkv
 
 -- NVENC (GPU 0)
-  HEVC       : -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 23 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8
+  HEVC       : -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 24 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8
                -multipass qres を足すと少し画質が上がる (速度への影響は GPU とプリセットによる)
   HEVC(10bit): -c:v hevc_nvenc ... -profile:v main10
   ...
   コピペ用のコマンド (input.ts / output.mkv を書き換えて使う):
     # HEVC
-    ffmpeg -i input.ts -vf format=nv12 -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 23 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8 -c:a copy output.mkv
+    ffmpeg -i input.ts -vf format=nv12 -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 24 -b:v 0 -maxrate 20M -bufsize 40M -bf 0 -rc-lookahead 20 -spatial_aq 1 -aq-strength 8 -c:a copy output.mkv
     # HEVC(10bit)
     ffmpeg -i input.ts -vf format=p010le -c:v hevc_nvenc ... -profile:v main10 -c:a copy output.mkv
     ...
